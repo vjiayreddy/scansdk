@@ -6,13 +6,14 @@ import {
   prewarmBarcodeDetector,
   scanImage,
 } from "@/lib/barcode/detector";
-import type { ScanResult, ScannerStatus } from "@/lib/barcode/types";
+import type { ScanMode, ScanResult, ScannerStatus } from "@/lib/barcode/types";
 
 interface UseBarcodeScannerResult {
   status: ScannerStatus;
   results: ScanResult | null;
   error: string | null;
-  scan: (file: File) => Promise<ScanResult | null>;
+  scan: (file: File, mode?: ScanMode) => Promise<ScanResult | null>;
+  scanHarder: (file: File) => Promise<ScanResult | null>;
   reset: () => void;
   isReady: boolean;
 }
@@ -56,14 +57,22 @@ export function useBarcodeScanner(): UseBarcodeScannerResult {
   }, [isReady]);
 
   const scan = useCallback(
-    async (file: File): Promise<ScanResult | null> => {
+    async (file: File, mode: ScanMode = "normal"): Promise<ScanResult | null> => {
       const scanId = ++scanIdRef.current;
       setError(null);
       setResults(null);
-      setStatus(isReady ? "scanning" : "loading-wasm");
+      setStatus(
+        mode === "hard"
+          ? isReady
+            ? "scanning-hard"
+            : "loading-wasm"
+          : isReady
+            ? "scanning"
+            : "loading-wasm",
+      );
 
       try {
-        const result = await scanImage(file);
+        const result = await scanImage(file, mode);
 
         if (scanId !== scanIdRef.current) {
           return null;
@@ -87,11 +96,17 @@ export function useBarcodeScanner(): UseBarcodeScannerResult {
     [isReady],
   );
 
+  const scanHarder = useCallback(
+    (file: File) => scan(file, "hard"),
+    [scan],
+  );
+
   return {
     status,
     results,
     error,
     scan,
+    scanHarder,
     reset,
     isReady,
   };

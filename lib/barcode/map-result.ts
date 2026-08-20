@@ -87,21 +87,34 @@ export function mapReadResult(
 }
 
 export function dedupeBarcodes(barcodes: DetectedBarcode[]): DetectedBarcode[] {
-  const seen = new Map<string, DetectedBarcode>();
+  const unique: DetectedBarcode[] = [];
 
   for (const barcode of barcodes) {
-    const centerX = Math.round(
-      barcode.boundingBox.x + barcode.boundingBox.width / 2,
+    const centerX = barcode.boundingBox.x + barcode.boundingBox.width / 2;
+    const centerY = barcode.boundingBox.y + barcode.boundingBox.height / 2;
+    const diagonal = Math.hypot(
+      barcode.boundingBox.width,
+      barcode.boundingBox.height,
     );
-    const centerY = Math.round(
-      barcode.boundingBox.y + barcode.boundingBox.height / 2,
-    );
-    const key = `${barcode.rawValue}@${centerX}:${centerY}`;
+    const threshold = Math.max(40, 1.5 * diagonal);
 
-    if (!seen.has(key)) {
-      seen.set(key, barcode);
+    const duplicate = unique.some((existing) => {
+      if (existing.rawValue !== barcode.rawValue) {
+        return false;
+      }
+
+      const existingX =
+        existing.boundingBox.x + existing.boundingBox.width / 2;
+      const existingY =
+        existing.boundingBox.y + existing.boundingBox.height / 2;
+
+      return Math.hypot(centerX - existingX, centerY - existingY) < threshold;
+    });
+
+    if (!duplicate) {
+      unique.push(barcode);
     }
   }
 
-  return [...seen.values()];
+  return unique;
 }

@@ -2,7 +2,7 @@ import { prepareZXingModule } from "barcode-detector/ponyfill";
 
 import { prepareCanvasFromFile } from "./preprocess";
 import { scanCanvas } from "./tile-scan";
-import type { DetectedBarcode, ScanResult } from "./types";
+import type { DetectedBarcode, ScanMode, ScanResult } from "./types";
 
 let wasmPrepared = false;
 
@@ -34,12 +34,15 @@ export function getBarcodeDetector(): Promise<void> {
   return prewarmBarcodeDetector();
 }
 
-export async function scanImage(file: File): Promise<ScanResult> {
+export async function scanImage(
+  file: File,
+  mode: ScanMode = "normal",
+): Promise<ScanResult> {
   const start = performance.now();
   prepareWasm();
 
   const { canvas, originalSize } = await prepareCanvasFromFile(file);
-  const barcodes = await scanCanvas(canvas);
+  const barcodes = await scanCanvas(canvas, { mode });
   const scaledBarcodes = mapCanvasCoordsToOriginal(
     barcodes,
     canvas.width,

@@ -8,7 +8,9 @@
     "start": "next start",
     "lint": "eslint",
     "postinstall": "mkdir -p public/wasm && cp node_modules/zxing-wasm/dist/reader/zxing_reader.wasm public/wasm/",
-    "test:barcode": "node scripts/browser-test.mjs"
+    "test:barcode": "node scripts/browser-test.mjs",
+    "test:pharma-multi": "node scripts/test-pharma-multi.mjs",
+    "test:pipeline": "node scripts/verify-pharma-pipeline.mjs"
   },
   "dependencies": {
     "barcode-detector": "^3.2.2",

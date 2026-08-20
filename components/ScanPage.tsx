@@ -31,6 +31,15 @@ function StatusBanner({
     );
   }
 
+  if (status === "scanning-hard") {
+    return (
+      <div className="rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300">
+        Running enhanced scan for blurry, tilted, or curved codes… This can take
+        up to 10 seconds.
+      </div>
+    );
+  }
+
   if (status === "error" && error) {
     return (
       <div
@@ -46,9 +55,13 @@ function StatusBanner({
 }
 
 export function ScanPage() {
-  const { status, results, error, scan, reset, isReady } = useBarcodeScanner();
+  const { status, results, error, scan, scanHarder, reset, isReady } =
+    useBarcodeScanner();
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const isBusy = status === "loading-wasm" || status === "scanning";
+  const isBusy =
+    status === "loading-wasm" ||
+    status === "scanning" ||
+    status === "scanning-hard";
 
   const handleFileSelect = useCallback(
     async (file: File) => {
@@ -91,9 +104,17 @@ export function ScanPage() {
           <div className="flex flex-wrap gap-3">
             <button
               type="button"
-              onClick={() => scan(selectedFile)}
+              onClick={() => scanHarder(selectedFile)}
               disabled={isBusy || !isReady}
               className="rounded-full bg-zinc-900 px-5 py-2.5 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
+            >
+              Scan Harder
+            </button>
+            <button
+              type="button"
+              onClick={() => scan(selectedFile)}
+              disabled={isBusy || !isReady}
+              className="rounded-full border border-zinc-300 px-5 py-2.5 text-sm font-medium text-zinc-800 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-900"
             >
               Scan Again
             </button>

@@ -1,11 +1,15 @@
 /** Keep enough resolution for small Data Matrix codes in wide photos. */
 export const MAX_DIMENSION = 4096;
 
-export const TILE_GRID_SIZE = 5;
+export const TILE_GRID_SIZE = 8;
 export const TILE_OVERLAP = 0.25;
 
-/** Upscale images so small Data Matrix codes reach readable pixel size. */
+/** Upscale small source images; large canvases rely on per-crop upscale instead. */
 export const SMALL_CODE_UPSCALE = 2;
+export const FULL_UPSCALE_MAX_SIDE = 2000;
+
+/** Run crop / dense tile stages when fewer than this many codes are found. */
+export const MULTI_DETECT_THRESHOLD = 8;
 
 function loadImageFromFile(file: File): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -54,7 +58,8 @@ function enhanceContrast(ctx: CanvasRenderingContext2D, width: number, height: n
       data[index] * 0.299 +
       data[index + 1] * 0.587 +
       data[index + 2] * 0.114;
-    const enhanced = gray < 128 ? Math.max(0, gray * 0.85) : Math.min(255, gray * 1.12);
+    // Mild stretch only — aggressive enhance crushed glare-adjacent Data Matrix modules.
+    const enhanced = gray < 128 ? Math.max(0, gray * 0.94) : Math.min(255, gray * 1.04);
 
     data[index] = enhanced;
     data[index + 1] = enhanced;
@@ -83,7 +88,9 @@ export async function prepareCanvasFromFile(file: File): Promise<PreparedCanvas>
     MAX_DIMENSION,
   );
 
-  const upscale = SMALL_CODE_UPSCALE;
+  const longestPrepared = Math.max(width, height);
+  const upscale =
+    longestPrepared >= FULL_UPSCALE_MAX_SIDE ? 1 : SMALL_CODE_UPSCALE;
   const canvas = document.createElement("canvas");
   canvas.width = Math.round(width * upscale);
   canvas.height = Math.round(height * upscale);
@@ -102,6 +109,28 @@ export async function prepareCanvasFromFile(file: File): Promise<PreparedCanvas>
     scale: resizeScale / upscale,
     originalSize,
   };
+}
+
+/** Upscale canvas for sparse scans so tiny label codes gain pixel density. */
+export function upscaleCanvas(
+  source: HTMLCanvasElement,
+  factor: number,
+): HTMLCanvasElement {
+  if (factor <= 1) {
+    return source;
+  }
+
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(source.width * factor);
+  canvas.height = Math.round(source.height * factor);
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) {
+    throw new Error("Canvas context unavailable");
+  }
+
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
+  return canvas;
 }
 
 export function canvasToBlob(canvas: HTMLCanvasElement): Promise<Blob> {
