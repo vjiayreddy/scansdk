@@ -1,0 +1,136 @@
+/** Keep enough resolution for small Data Matrix codes in wide photos. */
+export const MAX_DIMENSION = 4096;
+
+export const TILE_GRID_SIZE = 5;
+export const TILE_OVERLAP = 0.25;
+
+/** Upscale images so small Data Matrix codes reach readable pixel size. */
+export const SMALL_CODE_UPSCALE = 2;
+
+function loadImageFromFile(file: File): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(img);
+    };
+
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("Failed to load image"));
+    };
+
+    img.src = url;
+  });
+}
+
+function getScaledDimensions(
+  width: number,
+  height: number,
+  maxDimension: number,
+): { width: number; height: number; scale: number } {
+  const longestSide = Math.max(width, height);
+
+  if (longestSide <= maxDimension) {
+    return { width, height, scale: 1 };
+  }
+
+  const scale = maxDimension / longestSide;
+  return {
+    width: Math.round(width * scale),
+    height: Math.round(height * scale),
+    scale,
+  };
+}
+
+function enhanceContrast(ctx: CanvasRenderingContext2D, width: number, height: number) {
+  const imageData = ctx.getImageData(0, 0, width, height);
+  const { data } = imageData;
+
+  for (let index = 0; index < data.length; index += 4) {
+    const gray =
+      data[index] * 0.299 +
+      data[index + 1] * 0.587 +
+      data[index + 2] * 0.114;
+    const enhanced = gray < 128 ? Math.max(0, gray * 0.85) : Math.min(255, gray * 1.12);
+
+    data[index] = enhanced;
+    data[index + 1] = enhanced;
+    data[index + 2] = enhanced;
+  }
+
+  ctx.putImageData(imageData, 0, 0);
+}
+
+export interface PreparedCanvas {
+  canvas: HTMLCanvasElement;
+  /** Scale from original file pixels to canvas pixels (includes upscale). */
+  scale: number;
+  originalSize: { width: number; height: number };
+}
+
+export async function prepareCanvasFromFile(file: File): Promise<PreparedCanvas> {
+  const img = await loadImageFromFile(file);
+  const originalSize = {
+    width: img.naturalWidth,
+    height: img.naturalHeight,
+  };
+  const { width, height, scale: resizeScale } = getScaledDimensions(
+    img.naturalWidth,
+    img.naturalHeight,
+    MAX_DIMENSION,
+  );
+
+  const upscale = SMALL_CODE_UPSCALE;
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(width * upscale);
+  canvas.height = Math.round(height * upscale);
+
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) {
+    throw new Error("Canvas context unavailable");
+  }
+
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  enhanceContrast(ctx, canvas.width, canvas.height);
+
+  return {
+    canvas,
+    scale: resizeScale / upscale,
+    originalSize,
+  };
+}
+
+export function canvasToBlob(canvas: HTMLCanvasElement): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(
+      (result) => {
+        if (result) {
+          resolve(result);
+        } else {
+          reject(new Error("Failed to export image"));
+        }
+      },
+      "image/png",
+    );
+  });
+}
+
+/** @deprecated Use prepareCanvasFromFile instead. */
+export async function preprocessImage(file: File): Promise<{
+  source: Blob;
+  imageSize: { width: number; height: number };
+  scale: number;
+}> {
+  const { canvas, scale, originalSize } = await prepareCanvasFromFile(file);
+  const source = await canvasToBlob(canvas);
+
+  return {
+    source,
+    imageSize: originalSize,
+    scale,
+  };
+}
