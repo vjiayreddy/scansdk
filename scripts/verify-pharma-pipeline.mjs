@@ -33,9 +33,9 @@ prepareZXingModule({
   },
 });
 
-export async function scanFile(file: File) {
+export async function scanFile(file: File, mode = "normal") {
   const { canvas, originalSize } = await prepareCanvasFromFile(file);
-  const barcodes = await scanCanvas(canvas);
+  const barcodes = await scanCanvas(canvas, { mode });
   return {
     count: barcodes.length,
     formats: barcodes.map((b) => b.format),
@@ -107,6 +107,7 @@ const fixtures = [
   // Real pharma JPEGs are heavily compressed; treat as soft (informational) checks.
   { file: "pharma-bin-crop.png", minCount: 1, soft: true },
   { file: "pharma-bin.png", minCount: 1, soft: true },
+  { file: "pharma-bottles-tray.png", minCount: 5, soft: true },
 ];
 
 const browser = await chromium.launch();

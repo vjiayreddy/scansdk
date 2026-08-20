@@ -5,9 +5,12 @@
  */
 
 const SHARPEN_AMOUNT = 0.7;
+const HARD_SHARPEN_AMOUNT = 1.4;
 const CONTRAST_FACTOR = 1.35;
+const HARD_CONTRAST_FACTOR = 1.65;
 const ADAPTIVE_WINDOW = 21;
 const ADAPTIVE_C = 7;
+const ADAPTIVE_C_VARIANTS = [4, 7, 11, 15];
 
 function cloneImageData(imageData: ImageData): ImageData {
   return new ImageData(
@@ -43,7 +46,12 @@ function writeGray(imageData: ImageData, gray: Float32Array): ImageData {
 }
 
 /** Unsharp mask via 3×3 box blur. */
-function sharpenGray(gray: Float32Array, width: number, height: number): Float32Array {
+function sharpenGray(
+  gray: Float32Array,
+  width: number,
+  height: number,
+  amount = SHARPEN_AMOUNT,
+): Float32Array {
   const out = new Float32Array(gray.length);
 
   for (let y = 0; y < height; y += 1) {
@@ -61,18 +69,18 @@ function sharpenGray(gray: Float32Array, width: number, height: number): Float32
         }
       }
       blur /= 9;
-      out[index] = gray[index] + SHARPEN_AMOUNT * (gray[index] - blur);
+      out[index] = gray[index] + amount * (gray[index] - blur);
     }
   }
 
   return out;
 }
 
-function contrastGray(gray: Float32Array): Float32Array {
+function contrastGray(gray: Float32Array, factor = CONTRAST_FACTOR): Float32Array {
   const out = new Float32Array(gray.length);
 
   for (let i = 0; i < gray.length; i += 1) {
-    out[i] = (gray[i] - 128) * CONTRAST_FACTOR + 128;
+    out[i] = (gray[i] - 128) * factor + 128;
   }
 
   return out;
@@ -108,10 +116,11 @@ function localSum(
   );
 }
 
-function adaptiveThresholdGray(
+function adaptiveThresholdGrayWithC(
   gray: Float32Array,
   width: number,
   height: number,
+  c: number,
 ): Float32Array {
   const radius = Math.floor(ADAPTIVE_WINDOW / 2);
   const integral = buildIntegral(gray, width, height);
@@ -128,11 +137,73 @@ function adaptiveThresholdGray(
       const count = (x1 - x0) * (y1 - y0);
       const mean = localSum(integral, stride, x0, y0, x1, y1) / Math.max(1, count);
       const index = y * width + x;
-      out[index] = gray[index] < mean - ADAPTIVE_C ? 0 : 255;
+      out[index] = gray[index] < mean - c ? 0 : 255;
     }
   }
 
   return out;
+}
+
+function adaptiveThresholdGray(
+  gray: Float32Array,
+  width: number,
+  height: number,
+): Float32Array {
+  return adaptiveThresholdGrayWithC(gray, width, height, ADAPTIVE_C);
+}
+
+/** Replace blown-out glare pixels with a local neighborhood median. */
+export function suppressGlare(imageData: ImageData, threshold = 238): ImageData {
+  const { width, height, data } = imageData;
+  const out = cloneImageData(imageData);
+  const dst = out.data;
+
+  for (let y = 1; y < height - 1; y += 1) {
+    for (let x = 1; x < width - 1; x += 1) {
+      const i = (y * width + x) * 4;
+      const gray =
+        data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+
+      if (gray < threshold) {
+        continue;
+      }
+
+      const samples: number[] = [];
+      for (let dy = -1; dy <= 1; dy += 1) {
+        for (let dx = -1; dx <= 1; dx += 1) {
+          const j = ((y + dy) * width + (x + dx)) * 4;
+          const neighbor =
+            data[j] * 0.299 + data[j + 1] * 0.587 + data[j + 2] * 0.114;
+          if (neighbor < threshold) {
+            samples.push(neighbor);
+          }
+        }
+      }
+
+      if (samples.length === 0) {
+        continue;
+      }
+
+      samples.sort((a, b) => a - b);
+      const value = samples[Math.floor(samples.length / 2)];
+      dst[i] = value;
+      dst[i + 1] = value;
+      dst[i + 2] = value;
+    }
+  }
+
+  return out;
+}
+
+/** Several adaptive-threshold offsets for glare-heavy curved labels. */
+export function applyThresholdVariants(imageData: ImageData): ImageData[] {
+  const { width, height } = imageData;
+  const deGlared = suppressGlare(imageData);
+  const gray = contrastGray(sharpenGray(toGray(deGlared), width, height));
+
+  return ADAPTIVE_C_VARIANTS.map((c) =>
+    writeGray(imageData, adaptiveThresholdGrayWithC(gray, width, height, c)),
+  );
 }
 
 /** Grayscale + sharpen + contrast. ZXing still applies its own binarizer. */
@@ -146,6 +217,25 @@ export function applyClarifyFilters(imageData: ImageData): ImageData {
 export function applyCorrectionChain(imageData: ImageData): ImageData {
   const { width, height } = imageData;
   const clarified = contrastGray(sharpenGray(toGray(imageData), width, height));
+  return writeGray(imageData, adaptiveThresholdGray(clarified, width, height));
+}
+
+/** Stronger sharpen + contrast for blurry / motion-soft crops. */
+export function applyHardClarifyFilters(imageData: ImageData): ImageData {
+  const { width, height } = imageData;
+  const gray = toGray(imageData);
+  const sharpened = sharpenGray(gray, width, height, HARD_SHARPEN_AMOUNT);
+  const sharpenedTwice = sharpenGray(sharpened, width, height, HARD_SHARPEN_AMOUNT * 0.55);
+  const clarified = contrastGray(sharpenedTwice, HARD_CONTRAST_FACTOR);
+  return writeGray(imageData, clarified);
+}
+
+/** Hard-mode chain: aggressive clarify then adaptive threshold. */
+export function applyHardCorrectionChain(imageData: ImageData): ImageData {
+  const { width, height } = imageData;
+  const gray = toGray(imageData);
+  const sharpened = sharpenGray(gray, width, height, HARD_SHARPEN_AMOUNT);
+  const clarified = contrastGray(sharpened, HARD_CONTRAST_FACTOR);
   return writeGray(imageData, adaptiveThresholdGray(clarified, width, height));
 }
 

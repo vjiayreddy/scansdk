@@ -31,3 +31,14 @@ export const DATAMATRIX_CROP_OPTIONS: ReaderOptions = {
   maxNumberOfSymbols: 4,
   formats: ["DataMatrix"],
 };
+
+/** Blurry crops only — WASM denoise complements JS deblur filters. */
+export const DATAMATRIX_HARD_CROP_OPTIONS: ReaderOptions = {
+  tryHarder: true,
+  tryDenoise: true,
+  tryRotate: true,
+  tryInvert: true,
+  tryDownscale: false,
+  maxNumberOfSymbols: 4,
+  formats: ["DataMatrix"],
+};

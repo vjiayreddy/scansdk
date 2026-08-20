@@ -111,6 +111,28 @@ export async function prepareCanvasFromFile(file: File): Promise<PreparedCanvas>
   };
 }
 
+/** Upscale canvas for sparse scans so tiny label codes gain pixel density. */
+export function upscaleCanvas(
+  source: HTMLCanvasElement,
+  factor: number,
+): HTMLCanvasElement {
+  if (factor <= 1) {
+    return source;
+  }
+
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(source.width * factor);
+  canvas.height = Math.round(source.height * factor);
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) {
+    throw new Error("Canvas context unavailable");
+  }
+
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
+  return canvas;
+}
+
 export function canvasToBlob(canvas: HTMLCanvasElement): Promise<Blob> {
   return new Promise((resolve, reject) => {
     canvas.toBlob(

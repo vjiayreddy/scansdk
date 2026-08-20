@@ -11,14 +11,15 @@ export interface RegionProposal {
 /** Window sizes as fraction of min(canvas width, height). */
 const SCALE_FRACTIONS = [0.03, 0.05, 0.08];
 /** Absolute window sizes help when image resolution varies. */
-const ABSOLUTE_SIZES = [48, 72, 96, 128];
-const STRIDE_RATIO = 0.42;
+const ABSOLUTE_SIZES = [32, 40, 48, 56, 72, 96, 128];
+const STRIDE_RATIO = 0.38;
 const MAX_PROPOSALS = 40;
+const MAX_PROPOSALS_SPARSE = 85;
 const NMS_IOU = 0.4;
 const SAMPLE_STEP = 3;
-const MIN_VARIANCE = 90;
-const MIN_CONTRAST = 18;
-const MIN_2D_RATIO = 0.28;
+const MIN_VARIANCE = 70;
+const MIN_CONTRAST = 14;
+const MIN_2D_RATIO = 0.22;
 const SPATIAL_GRID = 8;
 const PER_CELL_KEEP = 6;
 
@@ -183,7 +184,7 @@ function collectWindowSizes(minSide: number): number[] {
     sizes.add(size);
   }
 
-  return [...sizes].filter((size) => size >= 28 && size <= minSide);
+  return [...sizes].filter((size) => size >= 24 && size <= minSide);
 }
 
 /**
@@ -244,10 +245,12 @@ export function seedFromDetections(
     const originX = barcode.boundingBox.x + barcode.boundingBox.width / 2;
     const originY = barcode.boundingBox.y + barcode.boundingBox.height / 2;
 
-    for (let row = -2; row <= 2; row += 1) {
-      for (let col = -3; col <= 3; col += 1) {
-        const cx = originX + col * pitch;
-        const cy = originY + row * pitch;
+    for (let row = -3; row <= 3; row += 1) {
+      for (let col = -5; col <= 5; col += 1) {
+        const pitchX = pitch;
+        const pitchY = pitch * 1.35;
+        const cx = originX + col * pitchX;
+        const cy = originY + row * pitchY;
         const x = Math.round(cx - size / 2);
         const y = Math.round(cy - size / 2);
 
@@ -266,7 +269,152 @@ export function seedFromDetections(
     }
   }
 
-  return nonMaxSuppression(seeds, 0.45, 36);
+  return nonMaxSuppression(seeds, 0.42, 48);
+}
+
+function median(values: number[]): number {
+  if (values.length === 0) {
+    return 0;
+  }
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? (sorted[mid - 1] + sorted[mid]) / 2
+    : sorted[mid];
+}
+
+/**
+ * Bottle trays: cluster hits into horizontal rows and seed the full row width.
+ * Handles staggered cylindrical labels better than a flat square grid alone.
+ */
+export function seedFromRowLayout(
+  barcodes: DetectedBarcode[],
+  canvasWidth: number,
+  canvasHeight: number,
+): RegionProposal[] {
+  if (barcodes.length === 0) {
+    return [];
+  }
+
+  const entries = barcodes.map((barcode) => ({
+    x: barcode.boundingBox.x + barcode.boundingBox.width / 2,
+    y: barcode.boundingBox.y + barcode.boundingBox.height / 2,
+    size: Math.max(
+      28,
+      Math.round(
+        Math.max(barcode.boundingBox.width, barcode.boundingBox.height) * 1.15,
+      ),
+    ),
+  }));
+
+  const avgSize = median(entries.map((entry) => entry.size));
+  const rowTolerance = avgSize * 1.1;
+  const sorted = [...entries].sort((a, b) => a.y - b.y);
+  const rows: { y: number; points: typeof entries }[] = [];
+
+  for (const point of sorted) {
+    const row = rows.find((candidate) => Math.abs(candidate.y - point.y) <= rowTolerance);
+    if (row) {
+      row.points.push(point);
+      row.y = (row.y * (row.points.length - 1) + point.y) / row.points.length;
+    } else {
+      rows.push({ y: point.y, points: [point] });
+    }
+  }
+
+  const seeds: RegionProposal[] = [];
+
+  for (const row of rows) {
+    row.points.sort((a, b) => a.x - b.x);
+    const xGaps: number[] = [];
+    for (let i = 1; i < row.points.length; i += 1) {
+      xGaps.push(row.points[i].x - row.points[i - 1].x);
+    }
+
+    const pitchX = Math.max(avgSize * 2.2, median(xGaps) || avgSize * 2.5);
+    const anchor = row.points[0];
+    const minX = Math.min(...row.points.map((point) => point.x));
+    const maxX = Math.max(...row.points.map((point) => point.x));
+    const startX = minX - pitchX * 3;
+    const endX = maxX + pitchX * 3;
+
+    const rowCenterX = row.points.reduce((sum, point) => sum + point.x, 0) / row.points.length;
+
+    for (let cx = startX; cx <= endX; cx += pitchX * 0.85) {
+      const x = Math.round(cx - anchor.size / 2);
+      const y = Math.round(row.y - anchor.size / 2);
+      if (x < 0 || y < 0 || x + anchor.size > canvasWidth || y + anchor.size > canvasHeight) {
+        continue;
+      }
+
+      seeds.push({
+        x,
+        y,
+        width: anchor.size,
+        height: anchor.size,
+        score: 45_000 - Math.abs(cx - rowCenterX) * 0.05,
+      });
+    }
+  }
+
+  const rowYs = rows.map((row) => row.y).sort((a, b) => a - b);
+  const rowGaps: number[] = [];
+  for (let i = 1; i < rowYs.length; i += 1) {
+    rowGaps.push(rowYs[i] - rowYs[i - 1]);
+  }
+  const pitchY = Math.max(avgSize * 2.8, median(rowGaps) || avgSize * 3);
+
+  for (const row of rows) {
+    for (const delta of [-2, -1, 1, 2]) {
+      const cy = row.y + delta * pitchY;
+      for (const point of row.points) {
+        const x = Math.round(point.x - point.size / 2);
+        const y = Math.round(cy - point.size / 2);
+        if (x < 0 || y < 0 || x + point.size > canvasWidth || y + point.size > canvasHeight) {
+          continue;
+        }
+
+        seeds.push({
+          x,
+          y,
+          width: point.size,
+          height: point.size,
+          score: 40_000 - Math.abs(delta) * 100,
+        });
+      }
+    }
+  }
+
+  return nonMaxSuppression(seeds, 0.4, 55);
+}
+
+/** Multi-scale uniform coverage for sparse curved-tray scenes. */
+export function multiScaleUniformProposals(
+  width: number,
+  height: number,
+  maxProposals = MAX_PROPOSALS_SPARSE,
+): RegionProposal[] {
+  const configs = [
+    { size: 40, stride: 24 },
+    { size: 52, stride: 30 },
+    { size: 68, stride: 38 },
+    { size: 84, stride: 46 },
+  ];
+
+  const proposals: RegionProposal[] = [];
+
+  for (const config of configs) {
+    const size = Math.max(32, Math.min(config.size, Math.min(width, height)));
+    const step = Math.max(14, config.stride);
+
+    for (let y = 0; y + size <= height; y += step) {
+      for (let x = 0; x + size <= width; x += step) {
+        proposals.push({ x, y, width: size, height: size, score: size });
+      }
+    }
+  }
+
+  return nonMaxSuppression(proposals, 0.35, maxProposals);
 }
 
 /** Uniform coverage fallback when texture ranking misses codes. */
@@ -275,9 +423,10 @@ export function uniformGridProposals(
   height: number,
   windowSize = 96,
   stride = 48,
+  maxProposals = MAX_PROPOSALS,
 ): RegionProposal[] {
-  const size = Math.max(40, Math.min(windowSize, Math.min(width, height)));
-  const step = Math.max(16, stride);
+  const size = Math.max(32, Math.min(windowSize, Math.min(width, height)));
+  const step = Math.max(14, stride);
   const proposals: RegionProposal[] = [];
 
   for (let y = 0; y + size <= height; y += step) {
@@ -292,7 +441,7 @@ export function uniformGridProposals(
     }
   }
 
-  return proposals.slice(0, MAX_PROPOSALS);
+  return proposals.slice(0, maxProposals);
 }
 
 export function mergeProposals(
