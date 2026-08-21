@@ -9,13 +9,21 @@ export type DetectedBarcode = Omit<LibraryDetectedBarcode, "boundingBox"> & {
   };
 };
 
+export type BarcodeStatus = "read" | "unread";
+
+export type ScanDetection = DetectedBarcode & {
+  status: BarcodeStatus;
+  score?: number;
+  source?: "yolo" | "zxing-full" | "proposal";
+};
+
 export interface ImageSize {
   width: number;
   height: number;
 }
 
 export interface ScanResult {
-  barcodes: DetectedBarcode[];
+  barcodes: ScanDetection[];
   durationMs: number;
   imageSize: ImageSize;
 }

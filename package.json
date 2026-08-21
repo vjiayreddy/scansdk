@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "postinstall": "mkdir -p public/wasm && cp node_modules/zxing-wasm/dist/reader/zxing_reader.wasm public/wasm/",
+    "postinstall": "mkdir -p public/wasm public/ort && cp node_modules/zxing-wasm/dist/reader/zxing_reader.wasm public/wasm/ && cp node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.wasm node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.mjs public/ort/",
     "test:barcode": "node scripts/browser-test.mjs",
     "test:pharma-multi": "node scripts/test-pharma-multi.mjs",
     "test:pipeline": "node scripts/verify-pharma-pipeline.mjs"
@@ -15,6 +15,7 @@
   "dependencies": {
     "barcode-detector": "^3.2.2",
     "next": "16.3.1",
+    "onnxruntime-web": "^1.27.0",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },

@@ -30,6 +30,31 @@ function loadImageFromFile(file: File): Promise<HTMLImageElement> {
   });
 }
 
+async function loadBitmapFromFile(
+  file: File,
+): Promise<ImageBitmap | HTMLImageElement> {
+  if (typeof createImageBitmap === "function") {
+    try {
+      return await createImageBitmap(file, { imageOrientation: "from-image" });
+    } catch {
+      // Older browsers or unsupported EXIF — fall back to Image.
+    }
+  }
+
+  return loadImageFromFile(file);
+}
+
+function sourceSize(source: ImageBitmap | HTMLImageElement): {
+  width: number;
+  height: number;
+} {
+  if ("naturalWidth" in source && source.naturalWidth) {
+    return { width: source.naturalWidth, height: source.naturalHeight };
+  }
+
+  return { width: source.width, height: source.height };
+}
+
 function getScaledDimensions(
   width: number,
   height: number,
@@ -77,14 +102,11 @@ export interface PreparedCanvas {
 }
 
 export async function prepareCanvasFromFile(file: File): Promise<PreparedCanvas> {
-  const img = await loadImageFromFile(file);
-  const originalSize = {
-    width: img.naturalWidth,
-    height: img.naturalHeight,
-  };
+  const source = await loadBitmapFromFile(file);
+  const originalSize = sourceSize(source);
   const { width, height, scale: resizeScale } = getScaledDimensions(
-    img.naturalWidth,
-    img.naturalHeight,
+    originalSize.width,
+    originalSize.height,
     MAX_DIMENSION,
   );
 
@@ -101,7 +123,10 @@ export async function prepareCanvasFromFile(file: File): Promise<PreparedCanvas>
   }
 
   ctx.imageSmoothingEnabled = false;
-  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
+  if ("close" in source) {
+    source.close();
+  }
   enhanceContrast(ctx, canvas.width, canvas.height);
 
   return {

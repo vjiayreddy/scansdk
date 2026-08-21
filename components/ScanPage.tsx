@@ -84,7 +84,8 @@ export function ScanPage() {
         </h1>
         <p className="text-base text-zinc-600 dark:text-zinc-400">
           Upload an image to detect QR codes, Data Matrix, EAN, UPC, Code128,
-          PDF417, and other barcode formats directly in your browser.
+          PDF417, and other barcode formats directly in your browser. Green
+          boxes were decoded; red boxes were located but not read.
         </p>
       </header>
 

@@ -999,3 +999,21 @@ export async function scanUniformCrops(
   );
   return decodeProposalsTwoPhase(canvas, proposals, deadline, knownHits, options);
 }
+
+/** Decode YOLO (or other) boxes as crop regions. */
+export async function scanLocatedRegions(
+  canvas: HTMLCanvasElement,
+  regions: Array<{ x: number; y: number; width: number; height: number; score?: number }>,
+  deadline: number,
+  options: CropScanOptions = {},
+): Promise<DetectedBarcode[]> {
+  const proposals: RegionProposal[] = regions.map((region) => ({
+    x: Math.round(region.x),
+    y: Math.round(region.y),
+    width: Math.round(region.width),
+    height: Math.round(region.height),
+    score: Math.round((region.score ?? 1) * 100_000),
+  }));
+
+  return decodeProposals(canvas, proposals, deadline, [], options);
+}

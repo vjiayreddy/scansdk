@@ -45,6 +45,8 @@ next-env.d.ts
 /datasets/
 /.venv-yolo/
 /runs/
+/public/ort/
 *.pt
 *.onnx
 *.engine
+!/public/models/*.onnx

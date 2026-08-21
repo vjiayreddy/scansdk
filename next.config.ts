@@ -6,6 +6,10 @@ const nextConfig: NextConfig = {
       source: "/wasm/:path*",
       headers: [{ key: "Content-Type", value: "application/wasm" }],
     },
+    {
+      source: "/ort/:path*.wasm",
+      headers: [{ key: "Content-Type", value: "application/wasm" }],
+    },
   ],
 };
 
