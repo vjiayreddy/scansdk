@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useState } from "react";
 
 import { BarcodeResults } from "@/components/BarcodeResults";
@@ -100,9 +101,17 @@ export function ScanPage() {
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-8 px-6 py-12">
       <header className="space-y-2">
-        <h1 className="text-3xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">
-          Barcode Scanner
-        </h1>
+        <div className="flex flex-wrap items-baseline justify-between gap-3">
+          <h1 className="text-3xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">
+            Barcode Scanner
+          </h1>
+          <Link
+            href="/live"
+            className="text-sm font-medium text-zinc-600 underline-offset-4 hover:underline dark:text-zinc-400"
+          >
+            Live camera
+          </Link>
+        </div>
         <p className="text-base text-zinc-600 dark:text-zinc-400">
           Upload an image to detect QR codes, Data Matrix, EAN, UPC, Code128,
           PDF417, and other barcode formats directly in your browser. Green
