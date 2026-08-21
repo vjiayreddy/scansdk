@@ -1,6 +1,6 @@
 "use client";
 
-import { Camera } from "lucide-react";
+import { Camera, List } from "lucide-react";
 import {
   startTransition,
   useCallback,
@@ -10,6 +10,9 @@ import {
   useState,
 } from "react";
 
+import { BarcodeResults } from "@/components/BarcodeResults";
+import { DetectionOverlayShape } from "@/components/DetectionOverlayShape";
+import { ResultsBottomSheet } from "@/components/ResultsBottomSheet";
 import { DevMetrics } from "@/components/scanner/DevMetrics";
 import { LocateStatusStrip } from "@/components/scanner/LocateStatusStrip";
 import { RoiViewfinder } from "@/components/scanner/RoiViewfinder";
@@ -17,7 +20,12 @@ import { ScannerDock } from "@/components/scanner/ScannerDock";
 import { useScannerChrome } from "@/components/scanner/ScannerChromeContext";
 import { Button } from "@/components/ui/button";
 import { useCameraStream } from "@/hooks/useCameraStream";
+import {
+  useLiveRoiDecode,
+  type LiveDecodedBox,
+} from "@/hooks/useLiveRoiDecode";
 import { useLiveYoloLocate } from "@/hooks/useLiveYoloLocate";
+import type { ScanDetection } from "@/lib/barcode/types";
 import {
   DEFAULT_ROI,
   ROI_PRESETS,
@@ -29,8 +37,28 @@ import {
 } from "@/lib/roi";
 import { cn } from "@/lib/utils";
 
-const DETECT_STROKE = "#22c55e";
-const DETECT_SCORE = "#ff4d8b";
+function liveBoxToScanDetection(box: LiveDecodedBox): ScanDetection {
+  const format = (box.format ?? "unknown") as ScanDetection["format"];
+  return {
+    rawValue: box.rawValue ?? "",
+    format,
+    boundingBox: {
+      x: box.x,
+      y: box.y,
+      width: box.width,
+      height: box.height,
+    },
+    cornerPoints: [
+      { x: box.x, y: box.y },
+      { x: box.x + box.width, y: box.y },
+      { x: box.x + box.width, y: box.y + box.height },
+      { x: box.x, y: box.y + box.height },
+    ],
+    status: box.status,
+    score: box.score,
+    source: "yolo",
+  };
+}
 
 export function LiveScanPage() {
   const {
@@ -59,9 +87,13 @@ export function LiveScanPage() {
   const [roi, setRoi] = useState<NormalizedRoi>(DEFAULT_ROI);
   const [flash, setFlash] = useState(false);
   const [stageSize, setStageSize] = useState({ width: 1, height: 1 });
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const [mediaEl, setMediaEl] = useState<HTMLVideoElement | null>(null);
   const autoStartedRef = useRef(false);
   const stageRef = useRef<HTMLDivElement>(null);
   const prevRoiHitRef = useRef(0);
+  const lastFlashReadAtRef = useRef(0);
+  const autoOpenedReadCountRef = useRef(0);
 
   const handleRoiChange = useCallback(
     (next: NormalizedRoi) => {
@@ -84,6 +116,7 @@ export function LiveScanPage() {
 
   const {
     boxes,
+    trackMeta,
     fps,
     inferenceMs,
     status: locateStatus,
@@ -92,6 +125,44 @@ export function LiveScanPage() {
   } = useLiveYoloLocate({
     videoRef,
     enabled: ready,
+  });
+
+  const sourceRoi = useMemo(() => {
+    if (!roiEnabled) {
+      return null;
+    }
+    return normalizedRoiToSourceBBox(
+      roi,
+      videoSize.width,
+      videoSize.height,
+      stageSize.width,
+      stageSize.height,
+      facingMode === "user",
+      "cover",
+    );
+  }, [
+    facingMode,
+    roi,
+    roiEnabled,
+    stageSize.height,
+    stageSize.width,
+    videoSize.height,
+    videoSize.width,
+  ]);
+
+  const {
+    decodedBoxes,
+    readCount,
+    decoding,
+    clearReads,
+    lastNewReadAt,
+  } = useLiveRoiDecode({
+    videoRef,
+    enabled: ready,
+    boxes,
+    trackMeta,
+    sourceRoi,
+    roiEnabled,
   });
 
   const handleStart = useCallback(async () => {
@@ -105,11 +176,13 @@ export function LiveScanPage() {
 
   const handleStop = useCallback(() => {
     clearBoxes();
+    clearReads();
     stop();
     setStarting(false);
-    // Keep ROI on; re-open edit/presets next time camera starts.
+    setSheetOpen(false);
+    autoOpenedReadCountRef.current = 0;
     setRoiEditing(true);
-  }, [clearBoxes, setRoiEditing, stop]);
+  }, [clearBoxes, clearReads, setRoiEditing, stop]);
 
   const handleFlip = useCallback(async () => {
     setStarting(true);
@@ -185,27 +258,36 @@ export function LiveScanPage() {
     setVideoSize({ width: video.videoWidth, height: video.videoHeight });
   }, [videoRef]);
 
-  const sourceRoi = useMemo(() => {
-    if (!roiEnabled) {
-      return null;
-    }
-    return normalizedRoiToSourceBBox(
-      roi,
-      videoSize.width,
-      videoSize.height,
-      stageSize.width,
-      stageSize.height,
-      facingMode === "user",
-      "cover",
-    );
-  }, [facingMode, roi, roiEnabled, stageSize.height, stageSize.width, videoSize.height, videoSize.width]);
-
   const visibleBoxes = useMemo(() => {
     if (!sourceRoi) {
-      return boxes;
+      return decodedBoxes;
     }
-    return boxes.filter((box) => boxIntersectsRoi(box, sourceRoi));
-  }, [boxes, sourceRoi]);
+    return decodedBoxes.filter((box) => boxIntersectsRoi(box, sourceRoi));
+  }, [decodedBoxes, sourceRoi]);
+
+  const overlayBarcodes = useMemo(
+    () => visibleBoxes.map(liveBoxToScanDetection),
+    [visibleBoxes],
+  );
+
+  const listBarcodes = useMemo(() => {
+    // Prefer on-screen detections; keep unique reads even if track left frame.
+    const byValue = new Map<string, ScanDetection>();
+    for (const barcode of overlayBarcodes) {
+      const key =
+        barcode.status === "read" && barcode.rawValue
+          ? `read:${barcode.rawValue}`
+          : `box:${barcode.boundingBox.x.toFixed(0)}:${barcode.boundingBox.y.toFixed(0)}:${barcode.status}`;
+      byValue.set(key, barcode);
+    }
+    return Array.from(byValue.values());
+  }, [overlayBarcodes]);
+
+  const unreadCount = listBarcodes.filter((b) => b.status === "unread").length;
+  const locatedCount = listBarcodes.filter(
+    (b) => b.status === "located",
+  ).length;
+  const totalCount = listBarcodes.length;
 
   useEffect(() => {
     if (!roiEnabled || !ready) {
@@ -222,22 +304,47 @@ export function LiveScanPage() {
     prevRoiHitRef.current = hit;
   }, [ready, roiEnabled, visibleBoxes.length]);
 
+  useEffect(() => {
+    if (!lastNewReadAt || lastNewReadAt === lastFlashReadAtRef.current) {
+      return;
+    }
+    lastFlashReadAtRef.current = lastNewReadAt;
+    setFlash(true);
+    const timer = window.setTimeout(() => setFlash(false), 450);
+    return () => window.clearTimeout(timer);
+  }, [lastNewReadAt]);
+
+  // Open results sheet once when the first successful live read lands (mobile UX).
+  useEffect(() => {
+    if (readCount <= 0 || readCount === autoOpenedReadCountRef.current) {
+      return;
+    }
+    autoOpenedReadCountRef.current = readCount;
+    setSheetOpen(true);
+  }, [readCount]);
+
   const statusLabel =
     locateStatus === "loading-model"
       ? "Loading YOLO model…"
-      : locateStatus === "running"
-        ? roiEnabled
-          ? "Locating in ROI…"
-          : "Locating barcodes…"
-        : locateStatus === "error"
-          ? "Locate error"
-          : ready
-            ? "Camera ready"
-            : "Camera stopped";
+      : decoding
+        ? "Reading…"
+        : locateStatus === "running"
+          ? roiEnabled
+            ? "Hold steady in ROI…"
+            : "Locating barcodes…"
+          : locateStatus === "error"
+            ? "Locate error"
+            : ready
+              ? "Camera ready"
+              : "Camera stopped";
 
   const error = cameraError ?? locateError;
   const running = ready;
   const showStopped = !running && !starting;
+
+  useEffect(() => {
+    setMediaEl(videoRef.current);
+  }, [ready, videoRef, videoSize.height, videoSize.width]);
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col md:flex-row">
@@ -265,34 +372,13 @@ export function LiveScanPage() {
               preserveAspectRatio="xMidYMid slice"
               aria-hidden="true"
             >
-              {visibleBoxes.map((box) => {
-                const strokeWidth = Math.max(
-                  2,
-                  Math.min(box.width, box.height) * 0.04,
-                );
-                return (
-                  <g key={box.id}>
-                    <rect
-                      x={box.x}
-                      y={box.y}
-                      width={box.width}
-                      height={box.height}
-                      fill="none"
-                      stroke={DETECT_STROKE}
-                      strokeWidth={strokeWidth}
-                    />
-                    <text
-                      x={box.x + strokeWidth}
-                      y={box.y + strokeWidth * 4}
-                      fill={DETECT_SCORE}
-                      fontSize={Math.max(12, strokeWidth * 3)}
-                      fontFamily="Inter, system-ui, sans-serif"
-                    >
-                      {(box.score * 100).toFixed(0)}%
-                    </text>
-                  </g>
-                );
-              })}
+              {overlayBarcodes.map((barcode, index) => (
+                <DetectionOverlayShape
+                  key={`${barcode.status}-${index}-${barcode.boundingBox.x}-${barcode.boundingBox.y}`}
+                  barcode={barcode}
+                  index={index}
+                />
+              ))}
             </svg>
           ) : null}
 
@@ -326,7 +412,7 @@ export function LiveScanPage() {
                   Camera stopped
                 </p>
                 <p className="mx-auto mt-2 max-w-xs text-sm leading-relaxed text-muted">
-                  Start again to continue live YOLO barcode localization.
+                  Start again to continue live locate and decode.
                 </p>
               </div>
               <Button
@@ -349,6 +435,24 @@ export function LiveScanPage() {
             </div>
           ) : null}
 
+          {running && totalCount > 0 ? (
+            <div className="pointer-events-auto absolute bottom-[max(5.5rem,env(safe-area-inset-bottom))] left-4 z-30 md:hidden">
+              <Button
+                type="button"
+                size="icon"
+                variant="onColor"
+                className="relative size-12 rounded-full shadow-md ring-1 ring-hairline"
+                aria-label={`Show ${totalCount} results`}
+                onClick={() => setSheetOpen(true)}
+              >
+                <List className="size-5" />
+                <span className="absolute -right-1 -top-1 inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-brand-pink px-1 text-[10px] font-semibold text-white">
+                  {totalCount}
+                </span>
+              </Button>
+            </div>
+          ) : null}
+
           <ScannerDock>
             <LocateStatusStrip
               visible={running}
@@ -356,6 +460,8 @@ export function LiveScanPage() {
               boxCount={visibleBoxes.length}
               fps={fps}
               inferenceMs={inferenceMs}
+              readCount={readCount}
+              decoding={decoding}
             />
           </ScannerDock>
         </div>
@@ -364,32 +470,52 @@ export function LiveScanPage() {
       <aside className="hidden w-full max-w-md flex-col border-l border-[var(--border-soft)] bg-[var(--background)] md:flex">
         <div className="border-b border-[var(--border-soft)] px-5 py-4">
           <h2 className="text-base font-semibold text-ink dark:text-[var(--foreground)]">
-            Live locate
+            Detected barcodes
+            {totalCount > 0 ? `: ${totalCount}` : ""}
           </h2>
           <p className="text-sm text-[var(--muted)]">
-            YOLO boxes only — decode is skipped in this mode.
-            {roiEnabled ? " · ROI filter on" : ""}
+            {running
+              ? `${readCount} read · ${unreadCount} unread · ${locatedCount} located`
+              : "Start the camera to begin localization."}
           </p>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
-          <p className="mb-4 text-sm text-[var(--muted)]">
-            {running
-              ? `${visibleBoxes.length} box${visibleBoxes.length === 1 ? "" : "es"} on screen`
-              : "Start the camera to begin localization."}
-          </p>
           <DevMetrics
             metrics={[
               { label: "Locate FPS", value: fps },
               { label: "Inference ms", value: inferenceMs },
               { label: "Boxes", value: visibleBoxes.length },
+              { label: "Reads", value: readCount },
               {
                 label: "ROI",
                 value: roiEnabled ? (roiEditing ? "editing" : "on") : "off",
               },
             ]}
           />
+          <div className="mt-4">
+            <BarcodeResults
+              barcodes={listBarcodes}
+              media={mediaEl}
+              imageSize={videoSize}
+              compact
+            />
+          </div>
         </div>
       </aside>
+
+      <ResultsBottomSheet
+        open={sheetOpen}
+        onClose={() => setSheetOpen(false)}
+        barcodes={listBarcodes}
+        media={mediaEl}
+        imageSize={videoSize}
+        title="Detected barcodes"
+        subtitle={
+          totalCount > 0
+            ? `${readCount} read · ${unreadCount} unread · ${locatedCount} located`
+            : undefined
+        }
+      />
     </div>
   );
 }

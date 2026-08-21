@@ -11,6 +11,8 @@ interface BarcodeResultsProps {
   durationMs?: number;
   /** Source image for crop thumbnails. */
   file?: File | null;
+  /** Live camera / canvas source for crop thumbnails (when no file). */
+  media?: HTMLCanvasElement | HTMLVideoElement | HTMLImageElement | null;
   imageSize?: ImageSize;
   /** Tighter list for the scanner aside panel. */
   compact?: boolean;
@@ -44,23 +46,30 @@ function CopyButton({ value }: { value: string }) {
 }
 
 function cropBarcodeThumb(
-  image: HTMLImageElement,
+  source: HTMLImageElement | HTMLCanvasElement | HTMLVideoElement,
   box: ScanDetection["boundingBox"],
 ): string | null {
+  const sourceWidth =
+    source instanceof HTMLVideoElement
+      ? source.videoWidth
+      : source instanceof HTMLImageElement
+        ? source.naturalWidth
+        : source.width;
+  const sourceHeight =
+    source instanceof HTMLVideoElement
+      ? source.videoHeight
+      : source instanceof HTMLImageElement
+        ? source.naturalHeight
+        : source.height;
+
   const padX = box.width * CROP_PAD;
   const padY = box.height * CROP_PAD;
   const sx = Math.max(0, Math.floor(box.x - padX));
   const sy = Math.max(0, Math.floor(box.y - padY));
-  const sw = Math.min(
-    image.naturalWidth - sx,
-    Math.ceil(box.width + padX * 2),
-  );
-  const sh = Math.min(
-    image.naturalHeight - sy,
-    Math.ceil(box.height + padY * 2),
-  );
+  const sw = Math.min(sourceWidth - sx, Math.ceil(box.width + padX * 2));
+  const sh = Math.min(sourceHeight - sy, Math.ceil(box.height + padY * 2));
 
-  if (sw <= 0 || sh <= 0) {
+  if (sw <= 0 || sh <= 0 || sourceWidth < 2 || sourceHeight < 2) {
     return null;
   }
 
@@ -76,7 +85,7 @@ function cropBarcodeThumb(
     return null;
   }
 
-  ctx.drawImage(image, sx, sy, sw, sh, 0, 0, dw, dh);
+  ctx.drawImage(source, sx, sy, sw, sh, 0, 0, dw, dh);
   try {
     return canvas.toDataURL("image/jpeg", 0.85);
   } catch {
@@ -104,6 +113,7 @@ export function BarcodeResults({
   barcodes,
   durationMs,
   file = null,
+  media = null,
   compact = false,
 }: BarcodeResultsProps) {
   const ordered = useMemo(() => {
@@ -114,17 +124,20 @@ export function BarcodeResults({
   }, [barcodes]);
 
   const thumbKey = useMemo(() => {
-    if (!file) {
-      return "";
-    }
     const boxes = ordered
       .map(
         (barcode) =>
-          `${Math.round(barcode.boundingBox.x)},${Math.round(barcode.boundingBox.y)},${Math.round(barcode.boundingBox.width)},${Math.round(barcode.boundingBox.height)}`,
+          `${Math.round(barcode.boundingBox.x)},${Math.round(barcode.boundingBox.y)},${Math.round(barcode.boundingBox.width)},${Math.round(barcode.boundingBox.height)},${barcode.status},${barcode.rawValue}`,
       )
       .join("|");
-    return `${file.name}:${file.size}:${file.lastModified}:${boxes}`;
-  }, [file, ordered]);
+    if (file) {
+      return `file:${file.name}:${file.size}:${file.lastModified}:${boxes}`;
+    }
+    if (media) {
+      return `media:${boxes}`;
+    }
+    return "";
+  }, [file, media, ordered]);
 
   const [thumbState, setThumbState] = useState<{
     key: string;
@@ -135,37 +148,45 @@ export function BarcodeResults({
   const unreadCount = barcodes.filter((b) => b.status === "unread").length;
 
   useEffect(() => {
-    if (!file || ordered.length === 0 || !thumbKey) {
+    if (ordered.length === 0 || !thumbKey) {
       return;
     }
 
     let cancelled = false;
 
-    void loadImageFromFile(file)
-      .then((image) => {
-        if (cancelled) {
-          return;
-        }
-        setThumbState({
-          key: thumbKey,
-          thumbs: ordered.map((barcode) =>
-            cropBarcodeThumb(image, barcode.boundingBox),
-          ),
-        });
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setThumbState({
-            key: thumbKey,
-            thumbs: ordered.map(() => null),
-          });
-        }
+    const applyThumbs = (
+      source: HTMLImageElement | HTMLCanvasElement | HTMLVideoElement,
+    ) => {
+      if (cancelled) {
+        return;
+      }
+      setThumbState({
+        key: thumbKey,
+        thumbs: ordered.map((barcode) =>
+          cropBarcodeThumb(source, barcode.boundingBox),
+        ),
       });
+    };
+
+    if (file) {
+      void loadImageFromFile(file)
+        .then(applyThumbs)
+        .catch(() => {
+          if (!cancelled) {
+            setThumbState({
+              key: thumbKey,
+              thumbs: ordered.map(() => null),
+            });
+          }
+        });
+    } else if (media) {
+      applyThumbs(media);
+    }
 
     return () => {
       cancelled = true;
     };
-  }, [file, ordered, thumbKey]);
+  }, [file, media, ordered, thumbKey]);
 
   const thumbs =
     thumbState.key === thumbKey ? thumbState.thumbs : ordered.map(() => null);
@@ -275,7 +296,7 @@ export function BarcodeResults({
                 ) : (
                   <p className="text-sm text-muted">
                     {isUnread
-                      ? "Located but Data Matrix decode failed — try a closer/sharper shot or Scan harder"
+                      ? "Located but decode failed — hold steady or move closer"
                       : "Located — reading…"}
                   </p>
                 )}

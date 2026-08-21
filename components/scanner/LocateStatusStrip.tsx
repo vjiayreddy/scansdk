@@ -7,6 +7,8 @@ type LocateStatusStripProps = {
   boxCount: number;
   fps: number;
   inferenceMs: number;
+  readCount?: number;
+  decoding?: boolean;
   visible?: boolean;
   className?: string;
 };
@@ -16,6 +18,8 @@ export function LocateStatusStrip({
   boxCount,
   fps,
   inferenceMs,
+  readCount = 0,
+  decoding = false,
   visible = true,
   className,
 }: LocateStatusStripProps) {
@@ -40,7 +44,9 @@ export function LocateStatusStrip({
           </p>
         </div>
         <p className="mt-1 text-[11px] font-medium text-muted">
-          {fps} FPS · {inferenceMs} ms inference
+          {fps} FPS · {inferenceMs} ms
+          {readCount > 0 ? ` · ${readCount} read` : ""}
+          {decoding ? " · decoding…" : ""}
         </p>
       </div>
     </div>
