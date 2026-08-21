@@ -2,10 +2,10 @@
 
 import { useCallback, useState } from "react";
 
-import type { DetectedBarcode } from "@/lib/barcode/types";
+import type { ScanDetection } from "@/lib/barcode/types";
 
 interface BarcodeResultsProps {
-  barcodes: DetectedBarcode[];
+  barcodes: ScanDetection[];
   durationMs?: number;
 }
 
@@ -38,6 +38,10 @@ function CopyButton({ value }: { value: string }) {
 }
 
 export function BarcodeResults({ barcodes, durationMs }: BarcodeResultsProps) {
+  const located = barcodes.filter((barcode) => barcode.status === "located");
+  const read = barcodes.filter((barcode) => barcode.status === "read");
+  const unread = barcodes.filter((barcode) => barcode.status === "unread");
+
   if (barcodes.length === 0) {
     return (
       <div className="rounded-2xl border border-zinc-200 bg-zinc-50 px-6 py-8 text-center dark:border-zinc-800 dark:bg-zinc-900">
@@ -53,11 +57,52 @@ export function BarcodeResults({ barcodes, durationMs }: BarcodeResultsProps) {
     );
   }
 
+  if (located.length === barcodes.length) {
+    return (
+      <div className="space-y-4">
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">
+            YOLO located {located.length} barcode
+            {located.length === 1 ? "" : "s"}
+          </h2>
+          {durationMs !== undefined ? (
+            <span className="text-sm text-zinc-500 dark:text-zinc-400">
+              Located in {durationMs}ms
+            </span>
+          ) : null}
+        </div>
+        <p className="text-sm text-zinc-500 dark:text-zinc-400">
+          Blue numbered boxes are YOLO detections only — decode is skipped.
+          Check whether every code in the photo has a box.
+        </p>
+        <ul className="space-y-2">
+          {located.map((barcode, index) => (
+            <li
+              key={`located-${index}`}
+              className="flex items-center justify-between rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm dark:border-zinc-800 dark:bg-zinc-950"
+            >
+              <span className="font-medium text-zinc-900 dark:text-zinc-100">
+                #{index + 1}
+              </span>
+              <span className="text-zinc-500 dark:text-zinc-400">
+                {barcode.score !== undefined
+                  ? `${Math.round(barcode.score * 100)}% conf`
+                  : "located"}
+                {` · ${Math.round(barcode.boundingBox.width)}×${Math.round(barcode.boundingBox.height)}`}
+              </span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-3">
         <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">
-          Detected Barcodes ({barcodes.length})
+          Detected Barcodes ({read.length}
+          {unread.length > 0 ? `, ${unread.length} unread` : ""})
         </h2>
         {durationMs !== undefined ? (
           <span className="text-sm text-zinc-500 dark:text-zinc-400">
@@ -67,7 +112,7 @@ export function BarcodeResults({ barcodes, durationMs }: BarcodeResultsProps) {
       </div>
 
       <ul className="space-y-3">
-        {barcodes.map((barcode, index) => (
+        {read.map((barcode, index) => (
           <li
             key={`${barcode.format}-${barcode.rawValue}-${index}`}
             className="rounded-2xl border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-950"
@@ -80,6 +125,24 @@ export function BarcodeResults({ barcodes, durationMs }: BarcodeResultsProps) {
             </div>
             <p className="break-all font-mono text-sm text-zinc-900 dark:text-zinc-100">
               {barcode.rawValue}
+            </p>
+          </li>
+        ))}
+        {unread.map((barcode, index) => (
+          <li
+            key={`unread-${index}`}
+            className="rounded-2xl border border-red-200 bg-red-50 p-4 dark:border-red-900 dark:bg-red-950"
+          >
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <span className="rounded-full bg-red-100 px-3 py-1 text-xs font-medium text-red-800 dark:bg-red-900 dark:text-red-100">
+                Located
+              </span>
+            </div>
+            <p className="text-sm text-red-800 dark:text-red-200">
+              Barcode found but not decoded
+              {barcode.score !== undefined
+                ? ` (${Math.round(barcode.score * 100)}% locate)`
+                : ""}
             </p>
           </li>
         ))}

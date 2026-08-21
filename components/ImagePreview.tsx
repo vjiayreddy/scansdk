@@ -2,15 +2,17 @@
 
 import { useEffect, useMemo, useState } from "react";
 
-import type { DetectedBarcode, ImageSize } from "@/lib/barcode/types";
+import type { DetectedBarcode, ImageSize, ScanDetection } from "@/lib/barcode/types";
 
 interface ImagePreviewProps {
   file: File;
-  barcodes?: DetectedBarcode[];
+  barcodes?: ScanDetection[];
   imageSize?: ImageSize;
 }
 
-const DETECT_FILL = "rgba(34, 197, 94, 0.78)";
+const DETECT_FILL_READ = "rgba(34, 197, 94, 0.78)";
+const DETECT_FILL_UNREAD = "rgba(211, 0, 5, 0.72)";
+const DETECT_STROKE_LOCATED = "#1151ff";
 
 export function ImagePreview({
   file,
@@ -127,6 +129,16 @@ export function ImagePreview({
                 {overlayBarcodes.map((barcode, index) => {
                   const box = barcode.boundingBox;
                   const hasBox = box.width > 1 && box.height > 1;
+                  const locateOnly = barcode.status === "located";
+                  const fill = locateOnly
+                    ? "none"
+                    : barcode.status === "unread"
+                      ? DETECT_FILL_UNREAD
+                      : DETECT_FILL_READ;
+                  const strokeWidth = Math.max(
+                    2,
+                    Math.min(box.width, box.height) * 0.04,
+                  );
 
                   return (
                     <g key={`${barcode.rawValue}-${index}`}>
@@ -136,18 +148,34 @@ export function ImagePreview({
                           y={box.y}
                           width={box.width}
                           height={box.height}
-                          fill={DETECT_FILL}
-                          stroke="none"
+                          fill={fill}
+                          stroke={locateOnly ? DETECT_STROKE_LOCATED : "none"}
+                          strokeWidth={locateOnly ? strokeWidth : 0}
                         />
                       ) : (
                         <polygon
                           points={barcode.cornerPoints
                             .map((point) => `${point.x},${point.y}`)
                             .join(" ")}
-                          fill={DETECT_FILL}
-                          stroke="none"
+                          fill={fill}
+                          stroke={locateOnly ? DETECT_STROKE_LOCATED : "none"}
+                          strokeWidth={locateOnly ? strokeWidth : 0}
                         />
                       )}
+                      {locateOnly && hasBox ? (
+                        <text
+                          x={box.x + strokeWidth}
+                          y={box.y + strokeWidth * 4}
+                          fill={DETECT_STROKE_LOCATED}
+                          fontSize={Math.max(12, strokeWidth * 4)}
+                          fontWeight={600}
+                        >
+                          {index + 1}
+                          {barcode.score !== undefined
+                            ? ` ${Math.round(barcode.score * 100)}%`
+                            : ""}
+                        </text>
+                      ) : null}
                     </g>
                   );
                 })}
