@@ -1,9 +1,10 @@
 import { LiveScanPage } from "@/components/LiveScanPage";
+import { ScannerShell } from "@/components/scanner/ScannerShell";
 
 export default function LivePage() {
   return (
-    <div className="min-h-full bg-zinc-50 dark:bg-black">
+    <ScannerShell>
       <LiveScanPage />
-    </div>
+    </ScannerShell>
   );
 }
