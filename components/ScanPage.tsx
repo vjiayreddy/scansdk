@@ -1,11 +1,12 @@
 "use client";
 
 import {
+  Camera,
   ImagePlus,
+  Images,
   List,
   ScanSearch,
   Trash2,
-  Upload,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
@@ -30,6 +31,26 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function guessImageMime(name: string): string {
+  const ext = name.split(".").pop()?.toLowerCase();
+  switch (ext) {
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+    case "png":
+      return "image/png";
+    case "webp":
+      return "image/webp";
+    case "gif":
+      return "image/gif";
+    case "bmp":
+      return "image/bmp";
+    default:
+      // Mobile camera captures are almost always JPEG when type is blank.
+      return "image/jpeg";
+  }
+}
+
 export function ScanPage() {
   const { status, results, error, scan, scanHarder, reset } =
     useBarcodeScanner();
@@ -37,7 +58,8 @@ export function ScanPage() {
   const [validationError, setValidationError] = useState<string | null>(null);
   const [sheetOpen, setSheetOpen] = useState(false);
   const [zoom, setZoom] = useState(1);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const galleryInputRef = useRef<HTMLInputElement>(null);
+  const cameraInputRef = useRef<HTMLInputElement>(null);
   const previewRef = useRef<ImagePreviewHandle>(null);
   const autoOpenedForRef = useRef<string | null>(null);
 
@@ -77,9 +99,10 @@ export function ScanPage() {
         return;
       }
 
+      const mime = file.type || guessImageMime(file.name);
       if (
         !ACCEPTED_IMAGE_TYPES.includes(
-          file.type as (typeof ACCEPTED_IMAGE_TYPES)[number],
+          mime as (typeof ACCEPTED_IMAGE_TYPES)[number],
         )
       ) {
         setValidationError(
@@ -99,8 +122,16 @@ export function ScanPage() {
       setSheetOpen(false);
       setZoom(1);
       autoOpenedForRef.current = null;
-      setSelectedFile(file);
-      await scan(file);
+      // Normalize empty MIME from some camera apps so downstream decode is happy.
+      const normalized =
+        file.type === mime
+          ? file
+          : new File([file], file.name || `capture.${mime.split("/")[1] ?? "jpg"}`, {
+              type: mime,
+              lastModified: file.lastModified,
+            });
+      setSelectedFile(normalized);
+      await scan(normalized);
     },
     [scan],
   );
@@ -145,26 +176,44 @@ export function ScanPage() {
         }
       >
         {!selectedFile ? (
-          <button
-            type="button"
-            className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 px-6 text-center disabled:opacity-60"
-            disabled={isBusy}
-            onClick={() => fileInputRef.current?.click()}
-          >
+          <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-5 px-6 text-center">
             <span className="flex size-14 items-center justify-center rounded-full bg-brand-lavender/80 text-ink">
-              <Upload className="size-6" />
+              <Images className="size-6" />
             </span>
-            <span className="text-lg font-semibold tracking-tight text-ink dark:text-[var(--foreground)]">
-              Upload an image
-            </span>
-            <span className="max-w-sm text-sm leading-relaxed text-muted">
-              Locate and read barcodes in the photo. Results open in a sheet
-              when done.
-            </span>
-            <span className="text-xs text-muted">
-              JPEG, PNG, WebP up to {formatFileSize(MAX_FILE_SIZE_BYTES)}
-            </span>
-          </button>
+            <div className="flex flex-col gap-2">
+              <span className="text-lg font-semibold tracking-tight text-ink dark:text-[var(--foreground)]">
+                Upload an image
+              </span>
+              <span className="mx-auto max-w-sm text-sm leading-relaxed text-muted">
+                Pick from your gallery or take a photo. Results open in a sheet
+                when done.
+              </span>
+              <span className="text-xs text-muted">
+                JPEG, PNG, WebP up to {formatFileSize(MAX_FILE_SIZE_BYTES)}
+              </span>
+            </div>
+            <div className="flex w-full max-w-sm flex-col gap-2 sm:flex-row sm:justify-center">
+              <Button
+                type="button"
+                className="h-12 w-full rounded-full px-6 sm:w-auto"
+                disabled={isBusy}
+                onClick={() => galleryInputRef.current?.click()}
+              >
+                <Images className="size-5" />
+                Gallery
+              </Button>
+              <Button
+                type="button"
+                variant="secondary"
+                className="h-12 w-full rounded-full px-6 sm:w-auto"
+                disabled={isBusy}
+                onClick={() => cameraInputRef.current?.click()}
+              >
+                <Camera className="size-5" />
+                Camera
+              </Button>
+            </div>
+          </div>
         ) : (
           <div className="absolute inset-0">
             <ImagePreview
@@ -273,10 +322,23 @@ export function ScanPage() {
               variant="ghost"
               className="size-11 rounded-full"
               disabled={isBusy}
-              aria-label={selectedFile ? "Upload another image" : "Upload image"}
-              onClick={() => fileInputRef.current?.click()}
+              aria-label={
+                selectedFile ? "Choose another from gallery" : "Choose from gallery"
+              }
+              onClick={() => galleryInputRef.current?.click()}
             >
               <ImagePlus className="size-5" />
+            </Button>
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              className="size-11 rounded-full"
+              disabled={isBusy}
+              aria-label={selectedFile ? "Take another photo" : "Take a photo"}
+              onClick={() => cameraInputRef.current?.click()}
+            >
+              <Camera className="size-5" />
             </Button>
             {selectedFile ? (
               <Button
@@ -296,9 +358,21 @@ export function ScanPage() {
       </div>
 
       <input
-        ref={fileInputRef}
+        ref={galleryInputRef}
         type="file"
         accept={ACCEPTED_IMAGE_TYPES.join(",")}
+        className="sr-only"
+        disabled={isBusy}
+        onChange={(event) => {
+          void acceptFile(event.target.files?.[0]);
+          event.target.value = "";
+        }}
+      />
+      <input
+        ref={cameraInputRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
         className="sr-only"
         disabled={isBusy}
         onChange={(event) => {

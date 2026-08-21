@@ -30,7 +30,10 @@ export function DetectionOverlayShape({
     : unread
       ? DETECT_STROKE_UNREAD
       : DETECT_STROKE_READ;
-  const strokeWidth = Math.max(2, Math.min(box.width, box.height) * 0.035);
+  // Locate-only: thin quiet stroke; read/unread keep stronger chrome.
+  const strokeWidth = locateOnly
+    ? Math.max(1.5, Math.min(box.width, box.height) * 0.018)
+    : Math.max(2, Math.min(box.width, box.height) * 0.035);
   const glyphSize = Math.max(
     16,
     Math.min(box.width, box.height) * (locateOnly ? 0 : 0.42),
@@ -50,6 +53,7 @@ export function DetectionOverlayShape({
           fill={fill}
           stroke={stroke}
           strokeWidth={strokeWidth}
+          opacity={locateOnly ? 0.85 : 1}
         />
       ) : (
         <polygon
@@ -59,6 +63,7 @@ export function DetectionOverlayShape({
           fill={fill}
           stroke={stroke}
           strokeWidth={strokeWidth}
+          opacity={locateOnly ? 0.85 : 1}
         />
       )}
       {hasBox && !locateOnly ? (
@@ -95,7 +100,7 @@ export function DetectionOverlayShape({
           />
         )
       ) : null}
-      {hasBox ? (
+      {hasBox && !locateOnly ? (
         <text
           x={box.x + strokeWidth}
           y={box.y + strokeWidth * 4}

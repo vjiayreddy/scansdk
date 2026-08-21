@@ -64,9 +64,9 @@ interface TrackedBox extends LiveYoloBox {
 
 const MATCH_IOU = 0.3;
 /** Keep drawing a box this many failed frames after last hit (anti-flicker). */
-const MAX_MISS = 2;
+const MAX_MISS = 1;
 /** Blend new detection into previous pose — high = snappier follow. */
-const POS_BLEND = 0.9;
+const POS_BLEND = 0.75;
 /** Velocity EMA toward measured frame-to-frame motion. */
 const VEL_BLEND = 0.55;
 /** Decay velocity when held without a fresh detection. */

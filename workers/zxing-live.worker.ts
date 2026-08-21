@@ -39,7 +39,7 @@ const FAST_OPTIONS: ReaderOptions = {
   tryInvert: true,
   tryDownscale: true,
   maxNumberOfSymbols: 2,
-  formats: ["DataMatrix"],
+  formats: ["DataMatrix", "QRCode", "EAN13", "Code128"],
   binarizer: "LocalAverage",
 };
 

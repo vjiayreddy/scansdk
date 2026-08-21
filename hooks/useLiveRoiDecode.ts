@@ -51,6 +51,8 @@ type TrackStatus = {
   format?: string;
   /** Consecutive decode misses before painting red. */
   failCount: number;
+  /** Decoder-refined box in video coordinates (preferred for overlay). */
+  refinedBox?: { x: number; y: number; width: number; height: number };
 };
 
 interface UseLiveRoiDecodeOptions {
@@ -71,7 +73,7 @@ interface UseLiveRoiDecodeResult {
   lastNewReadAt: number;
 }
 
-const STABLE_HITS = 2;
+const STABLE_HITS = 3;
 const STABLE_DELTA_RATIO = 0.18;
 const DECODE_COOLDOWN_MS = 150;
 const UNREAD_RETRY_MS = 400;
@@ -83,6 +85,8 @@ const FAILS_BEFORE_UNREAD = 2;
 const MAX_CROPS_PER_BURST = 2;
 /** Synthetic track ids for native-only hits (no YOLO box). */
 const NATIVE_ID_BASE = 1_000_000;
+/** Min IoU to treat a native hit as already covered by a YOLO box. */
+const NATIVE_YOLO_IOU = 0.2;
 
 let cropCanvas: HTMLCanvasElement | null = null;
 
@@ -134,6 +138,22 @@ function statusMapsEqual(
       other.rawValue !== value.rawValue ||
       other.format !== value.format ||
       other.failCount !== value.failCount
+    ) {
+      return false;
+    }
+    const rb = value.refinedBox;
+    const ob = other.refinedBox;
+    if (!rb && !ob) {
+      continue;
+    }
+    if (!rb || !ob) {
+      return false;
+    }
+    if (
+      Math.abs(rb.x - ob.x) > 0.75 ||
+      Math.abs(rb.y - ob.y) > 0.75 ||
+      Math.abs(rb.width - ob.width) > 0.75 ||
+      Math.abs(rb.height - ob.height) > 0.75
     ) {
       return false;
     }
@@ -239,6 +259,7 @@ export function useLiveRoiDecode({
 
       let bestId: number | null = null;
       let bestScore = 0;
+      let bestIou = 0;
       for (const box of currentBoxes) {
         const iou = boxIou(box, hit.boundingBox);
         const cx = hit.boundingBox.x + hit.boundingBox.width / 2;
@@ -251,22 +272,43 @@ export function useLiveRoiDecode({
         const score = iou + (inside ? 0.35 : 0);
         if (score > bestScore) {
           bestScore = score;
+          bestIou = iou;
           bestId = box.id;
         }
       }
 
-      if (bestId !== null && bestScore >= 0.08) {
+      const matchedYolo =
+        bestId !== null &&
+        (bestScore >= 0.08 || bestIou >= NATIVE_YOLO_IOU);
+
+      if (matchedYolo && bestId !== null) {
         const prev = nextStatus.get(bestId);
-        if (prev?.status !== "read" || prev.rawValue !== hit.rawValue) {
+        const refined = {
+          x: hit.boundingBox.x,
+          y: hit.boundingBox.y,
+          width: hit.boundingBox.width,
+          height: hit.boundingBox.height,
+        };
+        if (
+          prev?.status !== "read" ||
+          prev.rawValue !== hit.rawValue ||
+          !prev.refinedBox
+        ) {
           nextStatus.set(bestId, {
             status: "read",
             rawValue: hit.rawValue,
             format: hit.format,
             failCount: 0,
+            refinedBox: refined,
           });
           statusChanged = true;
         }
-      } else {
+      } else if (
+        // Skip native-only extras when any YOLO box already covers this hit.
+        !currentBoxes.some(
+          (box) => boxIou(box, hit.boundingBox) >= NATIVE_YOLO_IOU,
+        )
+      ) {
         let id = nativeIdByValueRef.current.get(hit.rawValue);
         if (id === undefined) {
           id = nativeNextIdRef.current++;
@@ -319,7 +361,7 @@ export function useLiveRoiDecode({
     let cancelled = false;
 
     const tick = () => {
-      if (cancelled || nativeBusyRef.current) {
+      if (cancelled || nativeBusyRef.current || isLiveDecodeBusy()) {
         return;
       }
       const video = videoRefInternal.current.current;
@@ -454,12 +496,17 @@ export function useLiveRoiDecode({
                 crop,
                 scale,
               );
-              void boxIou(box, videoBox);
+              const usable =
+                videoBox.width > 2 &&
+                videoBox.height > 2 &&
+                Number.isFinite(videoBox.x) &&
+                Number.isFinite(videoBox.y);
               nextStatus.set(box.id, {
                 status: "read",
                 rawValue: best.rawValue,
                 format: best.format,
                 failCount: 0,
+                refinedBox: usable ? videoBox : undefined,
               });
               if (!decodedValuesRef.current.has(best.rawValue)) {
                 decodedValuesRef.current.add(best.rawValue);
@@ -515,8 +562,19 @@ export function useLiveRoiDecode({
 
   const yoloDecoded: LiveDecodedBox[] = boxes.map((box) => {
     const info = statusById.get(box.id);
+    const refined = info?.refinedBox;
+    const useRefined =
+      refined !== undefined && refined.width > 2 && refined.height > 2;
     return {
       ...box,
+      ...(useRefined
+        ? {
+            x: refined.x,
+            y: refined.y,
+            width: refined.width,
+            height: refined.height,
+          }
+        : {}),
       status: info?.status ?? "located",
       rawValue: info?.rawValue,
       format: info?.format,

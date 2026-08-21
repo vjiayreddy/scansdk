@@ -51,7 +51,7 @@ const ScannerChromeContext = createContext<ScannerChromeState | null>(null);
 export function ScannerChromeProvider({ children }: { children: ReactNode }) {
   const [running, setRunning] = useState(false);
   const [facing, setFacing] = useState<FacingMode>("environment");
-  const [roiEditing, setRoiEditing] = useState(true);
+  const [roiEditing, setRoiEditing] = useState(false);
   const [roiEnabled, setRoiEnabled] = useState(true);
   const [roiPresetId, setRoiPresetId] = useState<RoiPresetId | null>(
     DEFAULT_ROI_PRESET,
@@ -63,7 +63,7 @@ export function ScannerChromeProvider({ children }: { children: ReactNode }) {
     controlsRef.current = controls;
     if (!controls) {
       setRunning(false);
-      setRoiEditing(true);
+      setRoiEditing(false);
       setRoiEnabled(true);
       setRoiPresetId(DEFAULT_ROI_PRESET);
     }

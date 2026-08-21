@@ -1,6 +1,6 @@
 "use client";
 
-import { Upload } from "lucide-react";
+import { Camera, Images, Upload } from "lucide-react";
 import { useCallback, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -24,7 +24,8 @@ function formatFileSize(bytes: number): string {
 
 /** Standalone dropzone — ScanPage uses an inline stage empty-state instead. */
 export function ImageUploader({ onFileSelect, disabled }: ImageUploaderProps) {
-  const inputRef = useRef<HTMLInputElement>(null);
+  const galleryInputRef = useRef<HTMLInputElement>(null);
+  const cameraInputRef = useRef<HTMLInputElement>(null);
   const [dragActive, setDragActive] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
 
@@ -83,16 +84,24 @@ export function ImageUploader({ onFileSelect, disabled }: ImageUploaderProps) {
 
   return (
     <div className="w-full">
-      <button
-        type="button"
-        disabled={disabled}
-        onClick={() => inputRef.current?.click()}
+      <div
+        role="button"
+        tabIndex={disabled ? -1 : 0}
         onDragEnter={handleDrag}
         onDragLeave={handleDrag}
         onDragOver={handleDrag}
         onDrop={handleDrop}
+        onKeyDown={(event) => {
+          if (disabled) {
+            return;
+          }
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            galleryInputRef.current?.click();
+          }
+        }}
         className={cn(
-          "flex w-full cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed px-6 py-12 transition-colors",
+          "flex w-full flex-col items-center justify-center rounded-xl border-2 border-dashed px-6 py-12 transition-colors",
           dragActive
             ? "border-ink bg-surface-soft"
             : "border-hairline bg-canvas hover:border-muted hover:bg-surface-soft",
@@ -103,17 +112,50 @@ export function ImageUploader({ onFileSelect, disabled }: ImageUploaderProps) {
           <Upload className="size-5" />
         </div>
         <p className="text-base font-semibold text-ink">
-          Drop an image here or click to upload
+          Drop an image here, or choose below
         </p>
         <p className="mt-1 text-sm text-muted">
           JPEG, PNG, WebP, GIF, BMP up to {formatFileSize(MAX_FILE_SIZE_BYTES)}
         </p>
-      </button>
+        <div className="mt-5 flex w-full max-w-xs flex-col gap-2 sm:flex-row">
+          <Button
+            type="button"
+            className="h-11 w-full rounded-full"
+            disabled={disabled}
+            onClick={() => galleryInputRef.current?.click()}
+          >
+            <Images className="size-4" />
+            Gallery
+          </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            className="h-11 w-full rounded-full"
+            disabled={disabled}
+            onClick={() => cameraInputRef.current?.click()}
+          >
+            <Camera className="size-4" />
+            Camera
+          </Button>
+        </div>
+      </div>
 
       <input
-        ref={inputRef}
+        ref={galleryInputRef}
         type="file"
         accept={ACCEPTED_IMAGE_TYPES.join(",")}
+        className="hidden"
+        disabled={disabled}
+        onChange={(event) => {
+          validateAndSelect(event.target.files?.[0]);
+          event.target.value = "";
+        }}
+      />
+      <input
+        ref={cameraInputRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
         className="hidden"
         disabled={disabled}
         onChange={(event) => {
@@ -127,18 +169,6 @@ export function ImageUploader({ onFileSelect, disabled }: ImageUploaderProps) {
           {validationError}
         </p>
       ) : null}
-
-      <div className="mt-3 flex justify-center sm:hidden">
-        <Button
-          type="button"
-          variant="secondary"
-          size="sm"
-          disabled={disabled}
-          onClick={() => inputRef.current?.click()}
-        >
-          Choose image
-        </Button>
-      </div>
     </div>
   );
 }

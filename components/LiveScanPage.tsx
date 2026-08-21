@@ -93,8 +93,6 @@ export function LiveScanPage() {
   const stageRef = useRef<HTMLDivElement>(null);
   const prevRoiHitRef = useRef(0);
   const lastFlashReadAtRef = useRef(0);
-  const autoOpenedReadCountRef = useRef(0);
-
   const handleRoiChange = useCallback(
     (next: NormalizedRoi) => {
       startTransition(() => {
@@ -180,8 +178,7 @@ export function LiveScanPage() {
     stop();
     setStarting(false);
     setSheetOpen(false);
-    autoOpenedReadCountRef.current = 0;
-    setRoiEditing(true);
+    setRoiEditing(false);
   }, [clearBoxes, clearReads, setRoiEditing, stop]);
 
   const handleFlip = useCallback(async () => {
@@ -314,15 +311,6 @@ export function LiveScanPage() {
     return () => window.clearTimeout(timer);
   }, [lastNewReadAt]);
 
-  // Open results sheet once when the first successful live read lands (mobile UX).
-  useEffect(() => {
-    if (readCount <= 0 || readCount === autoOpenedReadCountRef.current) {
-      return;
-    }
-    autoOpenedReadCountRef.current = readCount;
-    setSheetOpen(true);
-  }, [readCount]);
-
   const statusLabel =
     locateStatus === "loading-model"
       ? "Loading YOLO model…"
@@ -367,7 +355,10 @@ export function LiveScanPage() {
 
           {running ? (
             <svg
-              className="cl-overlay"
+              className={cn(
+                "cl-overlay",
+                facingMode === "user" && "scale-x-[-1]",
+              )}
               viewBox={`0 0 ${videoSize.width} ${videoSize.height}`}
               preserveAspectRatio="xMidYMid slice"
               aria-hidden="true"
