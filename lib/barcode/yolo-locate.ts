@@ -93,9 +93,20 @@ async function createSession(kind: YoloModelKind): Promise<InferenceSession> {
   }
 
   const model = new Uint8Array(await response.arrayBuffer());
-  return ort.InferenceSession.create(model, {
-    executionProviders: ["wasm"],
-  });
+  const providers =
+    kind === "live" && typeof navigator !== "undefined" && "gpu" in navigator
+      ? (["webgpu", "wasm"] as const)
+      : (["wasm"] as const);
+
+  try {
+    return await ort.InferenceSession.create(model, {
+      executionProviders: [...providers],
+    });
+  } catch {
+    return ort.InferenceSession.create(model, {
+      executionProviders: ["wasm"],
+    });
+  }
 }
 
 async function loadSession(kind: YoloModelKind): Promise<InferenceSession> {
@@ -265,7 +276,7 @@ export async function locateBarcodes(
 
 /**
  * Locate barcodes directly from a video element.
- * Prefers the live Web Worker (960); falls back to main-thread live session.
+ * Prefers the live Web Worker (640); falls back to main-thread live session.
  * Boxes are in video intrinsic pixels.
  */
 export async function locateBarcodesFromVideo(

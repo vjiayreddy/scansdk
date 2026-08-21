@@ -152,7 +152,8 @@ export function isLiveWorkerReady(): boolean {
 
 /**
  * Capture the current video frame and run live YOLO in the worker.
- * Transfers ImageBitmap so letterbox + CHW + inference stay off the UI thread.
+ * Transfers a downscaled ImageBitmap so letterbox + CHW + inference stay off
+ * the UI thread and phones spend less time copying 720p/1080p frames.
  */
 export async function locateBarcodesViaWorker(
   video: HTMLVideoElement,
@@ -162,7 +163,27 @@ export async function locateBarcodesViaWorker(
     throw new Error("Live YOLO worker unavailable");
   }
 
-  const bitmap = await createImageBitmap(video);
+  const sourceWidth = video.videoWidth;
+  const sourceHeight = video.videoHeight;
+  if (sourceWidth < 2 || sourceHeight < 2) {
+    return [];
+  }
+
+  // Cap capture near live imgsz — full HD transfer was a major mobile cost.
+  const maxEdge = Math.max(YOLO_LIVE_IMGSZ, 480);
+  const longEdge = Math.max(sourceWidth, sourceHeight);
+  const captureScale = longEdge > maxEdge ? maxEdge / longEdge : 1;
+  const resizeWidth = Math.max(2, Math.round(sourceWidth * captureScale));
+  const resizeHeight = Math.max(2, Math.round(sourceHeight * captureScale));
+
+  const bitmap =
+    captureScale < 1
+      ? await createImageBitmap(video, {
+          resizeWidth,
+          resizeHeight,
+          resizeQuality: "low",
+        })
+      : await createImageBitmap(video);
   const id = nextId++;
 
   return new Promise<YoloBox[]>((resolve, reject) => {
@@ -173,8 +194,8 @@ export async function locateBarcodesViaWorker(
           type: "locate",
           id,
           bitmap,
-          sourceWidth: video.videoWidth,
-          sourceHeight: video.videoHeight,
+          sourceWidth,
+          sourceHeight,
         },
         [bitmap],
       );

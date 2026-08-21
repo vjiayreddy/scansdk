@@ -111,9 +111,17 @@ async function handleInit(msg: InitMsg): Promise<void> {
     throw new Error(`ONNX fetch failed (${response.status}) for ${msg.modelUrl}`);
   }
   const model = new Uint8Array(await response.arrayBuffer());
-  session = await ortMod.InferenceSession.create(model, {
-    executionProviders: ["wasm"],
-  });
+  const preferGpu =
+    typeof navigator !== "undefined" && "gpu" in navigator;
+  try {
+    session = await ortMod.InferenceSession.create(model, {
+      executionProviders: preferGpu ? ["webgpu", "wasm"] : ["wasm"],
+    });
+  } catch {
+    session = await ortMod.InferenceSession.create(model, {
+      executionProviders: ["wasm"],
+    });
+  }
 }
 
 async function handleLocate(msg: LocateMsg): Promise<OutMsg> {
@@ -128,6 +136,11 @@ async function handleLocate(msg: LocateMsg): Promise<OutMsg> {
       height: msg.sourceHeight || msg.bitmap.height,
     };
     const { tensor, scale, padX, padY } = letterboxBitmap(msg.bitmap, imgsz);
+    // Bitmap may be downscaled for transfer; map boxes back to video pixels.
+    const mapScale =
+      msg.sourceWidth > 0 && msg.bitmap.width > 0
+        ? scale * (msg.bitmap.width / msg.sourceWidth)
+        : scale;
     const input = new ortMod.Tensor("float32", tensor, [1, 3, imgsz, imgsz]);
     const inputName = session.inputNames[0] ?? "images";
     const results = await session.run({ [inputName]: input });
@@ -146,7 +159,7 @@ async function handleLocate(msg: LocateMsg): Promise<OutMsg> {
     const boxes = parseYoloOutputData(
       output.data as Float32Array,
       output.dims,
-      scale,
+      mapScale,
       padX,
       padY,
       sw,

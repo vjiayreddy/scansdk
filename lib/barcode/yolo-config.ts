@@ -1,14 +1,13 @@
-/** Upload / live YOLO11n ONNX — fixed export shape is 960×960 (not dynamic). */
+/** Upload YOLO11n ONNX — fixed export shape is 960×960. */
 export const YOLO_IMGSZ = 960;
 export const YOLO_MODEL_URL = "/models/barcode-yolo11n.onnx";
 
 /**
- * Live must use the same letterbox size as the ONNX graph (960).
- * A 640 input fails OrtRun with "Got: 640 Expected: 960".
- * Dense small DM packs need lower conf + higher box cap (not a smaller imgsz).
+ * Live uses a separate 640×640 ONNX so mobile WASM can run at usable FPS.
+ * Upload keeps 960 for dense / tiny Data Matrix recall.
  */
-export const YOLO_LIVE_IMGSZ = YOLO_IMGSZ;
-export const YOLO_LIVE_MODEL_URL = YOLO_MODEL_URL;
+export const YOLO_LIVE_IMGSZ = 640;
+export const YOLO_LIVE_MODEL_URL = "/models/barcode-yolo11n-live.onnx";
 /**
  * Match upload floor so tiny / screen-captured Data Matrix still emit.
  * 0.4 was dropping most small cells in multi-code grids.

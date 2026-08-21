@@ -66,20 +66,20 @@ interface TrackedBox extends LiveYoloBox {
 const MATCH_IOU = 0.2;
 /** Pills LIVE_PRECISION.trackCenterMatchFactor × mean diagonal. */
 const MATCH_CENTER_FACTOR = 0.65;
-/** Confirm before first paint (anti ghost) — 2 hits @ ~2–3 FPS. */
-const MIN_HITS_TO_SHOW = 2;
+/** Confirm before first paint. 1 = paint on first hit (faster feel on mobile). */
+const MIN_HITS_TO_SHOW = 1;
 /**
  * Keep track identity this many miss frames for rematch — but do NOT paint
  * coasted boxes (barcode left frame must clear overlay immediately).
  */
 const MAX_MISS = 6;
-/** Rematch jump larger than this × mean diag → treat as new object (drop read). */
+/** Rematch jump larger than this × mean diag → treat as new object. */
 const JUMP_RESET_FACTOR = 0.75;
 /**
- * Minimum gap between locate starts. On phones OrtRun ~1–2s; without a gap
- * we queue continuous 960 inferences and starve the UI.
+ * Minimum gap between locate starts. 640 live is much faster than 960; keep a
+ * small floor so we do not queue back-to-back OrtRuns on weak phones.
  */
-const MIN_INFER_GAP_MS = 120;
+const MIN_INFER_GAP_MS = 40;
 
 function centerOf(box: { x: number; y: number; width: number; height: number }): {
   cx: number;
