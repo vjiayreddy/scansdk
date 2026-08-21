@@ -1,6 +1,14 @@
 "use client";
 
-import { ImagePlus, List, Trash2, Upload, ZoomIn, ZoomOut } from "lucide-react";
+import {
+  ImagePlus,
+  List,
+  ScanSearch,
+  Trash2,
+  Upload,
+  ZoomIn,
+  ZoomOut,
+} from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
@@ -23,7 +31,8 @@ function formatFileSize(bytes: number): string {
 }
 
 export function ScanPage() {
-  const { status, results, error, scanLocate, reset } = useBarcodeScanner();
+  const { status, results, error, scan, scanHarder, reset } =
+    useBarcodeScanner();
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [sheetOpen, setSheetOpen] = useState(false);
@@ -32,12 +41,35 @@ export function ScanPage() {
   const previewRef = useRef<ImagePreviewHandle>(null);
   const autoOpenedForRef = useRef<string | null>(null);
 
-  const isLocating = status === "locating";
+  const isBusy =
+    status === "locating" ||
+    status === "scanning" ||
+    status === "scanning-hard" ||
+    status === "loading-wasm";
   const bannerError = validationError ?? (status === "error" ? error : null);
   const totalCount = results?.barcodes.length ?? 0;
+  const readCount =
+    results?.barcodes.filter((barcode) => barcode.status === "read").length ??
+    0;
+  const unreadCount =
+    results?.barcodes.filter((barcode) => barcode.status === "unread")
+      .length ?? 0;
   const fileKey = selectedFile
     ? `${selectedFile.name}-${selectedFile.size}-${selectedFile.lastModified}`
     : null;
+  const canScanHarder =
+    Boolean(selectedFile) && status === "done" && unreadCount > 0;
+
+  const statusBanner =
+    !bannerError && selectedFile
+      ? status === "locating" || status === "loading-wasm"
+        ? "Locating barcodes…"
+        : status === "scanning-hard"
+          ? "Reading harder…"
+          : status === "scanning"
+            ? "Reading barcodes…"
+            : null
+      : null;
 
   const acceptFile = useCallback(
     async (file: File | undefined) => {
@@ -66,11 +98,21 @@ export function ScanPage() {
       setValidationError(null);
       setSheetOpen(false);
       setZoom(1);
+      autoOpenedForRef.current = null;
       setSelectedFile(file);
-      await scanLocate(file);
+      await scan(file);
     },
-    [scanLocate],
+    [scan],
   );
+
+  const handleScanHarder = useCallback(async () => {
+    if (!selectedFile) {
+      return;
+    }
+    setSheetOpen(false);
+    autoOpenedForRef.current = null;
+    await scanHarder(selectedFile);
+  }, [scanHarder, selectedFile]);
 
   const handleReset = useCallback(() => {
     setSelectedFile(null);
@@ -81,7 +123,7 @@ export function ScanPage() {
     reset();
   }, [reset]);
 
-  // Open results sheet once when a locate finishes for the current file.
+  // Open results sheet once when a scan finishes for the current file.
   useEffect(() => {
     if (status !== "done" || !results || !fileKey) {
       return;
@@ -106,7 +148,7 @@ export function ScanPage() {
           <button
             type="button"
             className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 px-6 text-center disabled:opacity-60"
-            disabled={isLocating}
+            disabled={isBusy}
             onClick={() => fileInputRef.current?.click()}
           >
             <span className="flex size-14 items-center justify-center rounded-full bg-brand-lavender/80 text-ink">
@@ -116,7 +158,7 @@ export function ScanPage() {
               Upload an image
             </span>
             <span className="max-w-sm text-sm leading-relaxed text-muted">
-              YOLO locates every barcode in the photo. Results open in a sheet
+              Locate and read barcodes in the photo. Results open in a sheet
               when done.
             </span>
             <span className="text-xs text-muted">
@@ -147,9 +189,19 @@ export function ScanPage() {
           </div>
         ) : null}
 
-        {selectedFile && isLocating && !bannerError ? (
-          <div className="absolute left-3 top-3 z-20 rounded-md bg-black/75 px-3 py-2 text-xs font-semibold text-white">
-            Locating barcodes…
+        {statusBanner ? (
+          <div
+            className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center px-6"
+            role="status"
+            aria-live="polite"
+          >
+            <div className="flex items-center gap-2.5 rounded-full bg-black/80 px-5 py-3 text-sm font-semibold tracking-tight text-white shadow-lg backdrop-blur-sm">
+              <span
+                className="size-4 shrink-0 animate-spin rounded-full border-2 border-white/30 border-t-white"
+                aria-hidden
+              />
+              {statusBanner}
+            </div>
           </div>
         ) : null}
 
@@ -200,6 +252,18 @@ export function ScanPage() {
                 </span>
               </Button>
             ) : null}
+            {canScanHarder ? (
+              <Button
+                type="button"
+                variant="onColor"
+                className="h-12 rounded-full px-4 shadow-md ring-1 ring-hairline"
+                aria-label={`Scan harder — ${unreadCount} unread`}
+                onClick={() => void handleScanHarder()}
+              >
+                <ScanSearch className="size-5" />
+                Scan harder
+              </Button>
+            ) : null}
           </div>
 
           <div className="pointer-events-auto flex items-center gap-2 rounded-full border border-hairline bg-canvas/95 p-1 shadow-md backdrop-blur-sm dark:border-[var(--border)] dark:bg-[var(--background)]/95">
@@ -208,7 +272,7 @@ export function ScanPage() {
               size="icon"
               variant="ghost"
               className="size-11 rounded-full"
-              disabled={isLocating}
+              disabled={isBusy}
               aria-label={selectedFile ? "Upload another image" : "Upload image"}
               onClick={() => fileInputRef.current?.click()}
             >
@@ -220,7 +284,7 @@ export function ScanPage() {
                 size="icon"
                 variant="ghost"
                 className="size-11 rounded-full text-error hover:bg-error/10"
-                disabled={isLocating}
+                disabled={isBusy}
                 aria-label="Clear image"
                 onClick={handleReset}
               >
@@ -236,7 +300,7 @@ export function ScanPage() {
         type="file"
         accept={ACCEPTED_IMAGE_TYPES.join(",")}
         className="sr-only"
-        disabled={isLocating}
+        disabled={isBusy}
         onChange={(event) => {
           void acceptFile(event.target.files?.[0]);
           event.target.value = "";
@@ -248,7 +312,14 @@ export function ScanPage() {
         onClose={() => setSheetOpen(false)}
         barcodes={results?.barcodes ?? []}
         durationMs={results?.durationMs}
-        title="Located barcodes"
+        file={selectedFile}
+        imageSize={results?.imageSize}
+        title="Detected barcodes"
+        subtitle={
+          status === "done" && results
+            ? `${readCount} read · ${unreadCount} unread · ${results.durationMs} ms`
+            : undefined
+        }
       />
     </div>
   );

@@ -4,9 +4,11 @@ export const MAX_DIMENSION = 4096;
 export const TILE_GRID_SIZE = 8;
 export const TILE_OVERLAP = 0.25;
 
-/** Upscale small source images; large canvases rely on per-crop upscale instead. */
+/** Upscale so small Data Matrix modules keep usable pixels before crop decode. */
 export const SMALL_CODE_UPSCALE = 2;
-export const FULL_UPSCALE_MAX_SIDE = 2000;
+export const FULL_UPSCALE_MAX_SIDE = 1600;
+/** Prefer at least this long side after prepare (capped by MAX_DIMENSION). */
+export const TARGET_PREPARE_LONG_SIDE = 2800;
 
 /** Run crop / dense tile stages when fewer than this many codes are found. */
 export const MULTI_DETECT_THRESHOLD = 8;
@@ -74,26 +76,6 @@ function getScaledDimensions(
   };
 }
 
-function enhanceContrast(ctx: CanvasRenderingContext2D, width: number, height: number) {
-  const imageData = ctx.getImageData(0, 0, width, height);
-  const { data } = imageData;
-
-  for (let index = 0; index < data.length; index += 4) {
-    const gray =
-      data[index] * 0.299 +
-      data[index + 1] * 0.587 +
-      data[index + 2] * 0.114;
-    // Mild stretch only — aggressive enhance crushed glare-adjacent Data Matrix modules.
-    const enhanced = gray < 128 ? Math.max(0, gray * 0.94) : Math.min(255, gray * 1.04);
-
-    data[index] = enhanced;
-    data[index + 1] = enhanced;
-    data[index + 2] = enhanced;
-  }
-
-  ctx.putImageData(imageData, 0, 0);
-}
-
 export interface PreparedCanvas {
   canvas: HTMLCanvasElement;
   /** Scale from original file pixels to canvas pixels (includes upscale). */
@@ -111,8 +93,20 @@ export async function prepareCanvasFromFile(file: File): Promise<PreparedCanvas>
   );
 
   const longestPrepared = Math.max(width, height);
-  const upscale =
-    longestPrepared >= FULL_UPSCALE_MAX_SIDE ? 1 : SMALL_CODE_UPSCALE;
+  // Push soft warehouse photos toward ~2800px so tiny DM modules survive crop upscale.
+  const targetLongest = Math.min(
+    MAX_DIMENSION,
+    Math.max(
+      TARGET_PREPARE_LONG_SIDE,
+      longestPrepared *
+        (longestPrepared < FULL_UPSCALE_MAX_SIDE
+          ? SMALL_CODE_UPSCALE
+          : longestPrepared < 2800
+            ? 1.5
+            : 1),
+    ),
+  );
+  const upscale = Math.max(1, targetLongest / longestPrepared);
   const canvas = document.createElement("canvas");
   canvas.width = Math.round(width * upscale);
   canvas.height = Math.round(height * upscale);
@@ -122,12 +116,14 @@ export async function prepareCanvasFromFile(file: File): Promise<PreparedCanvas>
     throw new Error("Canvas context unavailable");
   }
 
-  ctx.imageSmoothingEnabled = false;
+  ctx.imageSmoothingEnabled = upscale > 1.25;
+  if (ctx.imageSmoothingEnabled) {
+    ctx.imageSmoothingQuality = "high";
+  }
   ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
   if ("close" in source) {
     source.close();
   }
-  enhanceContrast(ctx, canvas.width, canvas.height);
 
   return {
     canvas,
