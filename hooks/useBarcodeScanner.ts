@@ -1,0 +1,147 @@
+"use client";
+
+import { useCallback, useEffect, useRef, useState } from "react";
+
+import {
+  prewarmBarcodeDetector,
+  scanImage,
+} from "@/lib/barcode/detector";
+import type { ScanMode, ScanResult, ScannerStatus } from "@/lib/barcode/types";
+
+interface UseBarcodeScannerResult {
+  status: ScannerStatus;
+  results: ScanResult | null;
+  error: string | null;
+  scan: (file: File, mode?: ScanMode) => Promise<ScanResult | null>;
+  scanHarder: (file: File) => Promise<ScanResult | null>;
+  scanLocate: (file: File) => Promise<ScanResult | null>;
+  reset: () => void;
+  isReady: boolean;
+}
+
+export function useBarcodeScanner(): UseBarcodeScannerResult {
+  const [status, setStatus] = useState<ScannerStatus>("loading-wasm");
+  const [results, setResults] = useState<ScanResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [isReady, setIsReady] = useState(false);
+  const scanIdRef = useRef(0);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    prewarmBarcodeDetector()
+      .then(() => {
+        if (!cancelled) {
+          setIsReady(true);
+          setStatus("idle");
+        }
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setError(
+            err instanceof Error ? err.message : "Failed to initialize scanner",
+          );
+          setStatus("error");
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const reset = useCallback(() => {
+    scanIdRef.current += 1;
+    setResults(null);
+    setError(null);
+    setStatus(isReady ? "idle" : "loading-wasm");
+  }, [isReady]);
+
+  const scan = useCallback(
+    async (file: File, mode: ScanMode = "normal"): Promise<ScanResult | null> => {
+      const scanId = ++scanIdRef.current;
+      setError(null);
+      setResults(null);
+      setStatus(
+        mode === "hard"
+          ? isReady
+            ? "scanning-hard"
+            : "loading-wasm"
+          : mode === "locate"
+            ? isReady
+              ? "locating"
+              : "loading-wasm"
+            : isReady
+              ? "locating"
+              : "loading-wasm",
+      );
+
+      try {
+        const result = await scanImage(file, mode, {
+          onPhase: (update) => {
+            if (scanId !== scanIdRef.current) {
+              return;
+            }
+
+            if (update.phase === "locating") {
+              setStatus(mode === "hard" ? "scanning-hard" : "locating");
+              return;
+            }
+
+            if (update.phase === "located" && update.partial) {
+              setResults(update.partial);
+              return;
+            }
+
+            if (update.phase === "reading") {
+              setStatus(mode === "hard" ? "scanning-hard" : "scanning");
+              if (update.partial) {
+                setResults(update.partial);
+              }
+            }
+          },
+        });
+
+        if (scanId !== scanIdRef.current) {
+          return null;
+        }
+
+        setResults(result);
+        setStatus("done");
+        return result;
+      } catch (err: unknown) {
+        if (scanId !== scanIdRef.current) {
+          return null;
+        }
+
+        const message =
+          err instanceof Error ? err.message : "Barcode scan failed";
+        setError(message);
+        setStatus("error");
+        return null;
+      }
+    },
+    [isReady],
+  );
+
+  const scanHarder = useCallback(
+    (file: File) => scan(file, "hard"),
+    [scan],
+  );
+
+  const scanLocate = useCallback(
+    (file: File) => scan(file, "locate"),
+    [scan],
+  );
+
+  return {
+    status,
+    results,
+    error,
+    scan,
+    scanHarder,
+    scanLocate,
+    reset,
+    isReady,
+  };
+}
