@@ -42,7 +42,7 @@ type OutMsg =
 
 let session: import("onnxruntime-web").InferenceSession | null = null;
 let ortMod: typeof import("onnxruntime-web/wasm") | null = null;
-let imgsz = 640;
+let imgsz = 960;
 let confThresh = 0.4;
 let maxBoxes = 8;
 let pooledCanvas: OffscreenCanvas | null = null;

@@ -1,12 +1,13 @@
-/** Upload YOLO11n ONNX (letterbox imgsz should match export for best quality). */
+/** Upload / live YOLO11n ONNX — fixed export shape is 960×960 (not dynamic). */
 export const YOLO_IMGSZ = 960;
 export const YOLO_MODEL_URL = "/models/barcode-yolo11n.onnx";
 
 /**
- * Live uses the same weights but a smaller letterbox for mobile FPS.
- * YOLO is fully convolutional — 640 is valid (multiple of 32) and ~2.25× cheaper than 960.
+ * Live must use the same letterbox size as the ONNX graph (960).
+ * A 640 input fails OrtRun with "Got: 640 Expected: 960".
+ * Mobile speed comes from higher conf, box cap, and locate throttling — not imgsz.
  */
-export const YOLO_LIVE_IMGSZ = 640;
+export const YOLO_LIVE_IMGSZ = YOLO_IMGSZ;
 export const YOLO_LIVE_MODEL_URL = YOLO_MODEL_URL;
 /** Higher live threshold cuts false pink/red boxes on glare / screen noise. */
 export const YOLO_LIVE_CONF = 0.4;

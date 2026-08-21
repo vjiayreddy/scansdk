@@ -254,7 +254,7 @@ export async function locateBarcodes(
 
 /**
  * Locate barcodes directly from a video element.
- * Prefers the live Web Worker (640); falls back to main-thread live session.
+ * Prefers the live Web Worker (960); falls back to main-thread live session.
  * Boxes are in video intrinsic pixels.
  */
 export async function locateBarcodesFromVideo(

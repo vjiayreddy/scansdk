@@ -272,6 +272,11 @@ function metaNearlyEqual(a: LiveTrackMeta[], b: LiveTrackMeta[]): boolean {
 const MIN_VEL = 0.015;
 /** Cap React publishes from extrapolation (~20 fps). */
 const EXTRAPOLATE_PUBLISH_MS = 50;
+/**
+ * Minimum gap between locate starts. On phones OrtRun ~1–2s; without a gap
+ * we queue continuous 960 inferences and starve decode/UI.
+ */
+const MIN_INFER_GAP_MS = 120;
 
 export function useLiveYoloLocate({
   videoRef,
@@ -409,6 +414,10 @@ export function useLiveYoloLocate({
             return;
           }
 
+          if (now - lastInferAtRef.current < MIN_INFER_GAP_MS) {
+            return;
+          }
+
           const video = videoRef.current;
           if (!video || video.readyState < 2 || video.videoWidth < 2) {
             return;
@@ -417,6 +426,9 @@ export function useLiveYoloLocate({
           busyRef.current = true;
           const requestId = ++requestIdRef.current;
           const captureAt = performance.now();
+          const prevCaptureAt = lastInferAtRef.current;
+          // Reserve the slot immediately so RAF does not pile up starts.
+          lastInferAtRef.current = captureAt;
 
           void (async () => {
             try {
@@ -437,8 +449,7 @@ export function useLiveYoloLocate({
                 return;
               }
 
-              const inferDt = Math.max(1, captureAt - lastInferAtRef.current);
-              lastInferAtRef.current = captureAt;
+              const inferDt = Math.max(1, captureAt - prevCaptureAt);
 
               tracksRef.current = stabilizeTracks(
                 tracksRef.current,
