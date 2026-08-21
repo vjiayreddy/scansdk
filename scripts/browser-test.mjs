@@ -41,7 +41,7 @@ for (const fixture of fixtures) {
   const filePath = path.join(root, "test-fixtures", fixture.file);
   await page.locator('input[type="file"]').setInputFiles(filePath);
 
-  await page.getByText("Located barcodes", { exact: false }).waitFor({
+  await page.getByText("Detected barcodes", { exact: false }).waitFor({
     timeout: 30000,
   });
 

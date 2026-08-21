@@ -21,15 +21,16 @@ export const FAST_DATAMATRIX_OPTIONS: ReaderOptions = {
   formats: ["DataMatrix"],
 };
 
-/** Per-crop decode: Data Matrix only. Denoise off — filters run in JS when needed. */
+/** Per-crop decode: Data Matrix only. Denoise helps soft/JPEG pharma packs. */
 export const DATAMATRIX_CROP_OPTIONS: ReaderOptions = {
   tryHarder: true,
-  tryDenoise: false,
+  tryDenoise: true,
   tryRotate: true,
   tryInvert: true,
-  tryDownscale: false,
+  tryDownscale: true,
   maxNumberOfSymbols: 4,
   formats: ["DataMatrix"],
+  binarizer: "LocalAverage",
 };
 
 /** Blurry crops only — WASM denoise complements JS deblur filters. */
@@ -38,7 +39,24 @@ export const DATAMATRIX_HARD_CROP_OPTIONS: ReaderOptions = {
   tryDenoise: true,
   tryRotate: true,
   tryInvert: true,
-  tryDownscale: false,
+  tryDownscale: true,
   maxNumberOfSymbols: 4,
   formats: ["DataMatrix"],
+  binarizer: "LocalAverage",
 };
+
+const BINARIZER_PASSES = [
+  "LocalAverage",
+  "GlobalHistogram",
+  "FixedThreshold",
+] as const;
+
+/** Try alternate binarizers when the default fails on soft JPEG modules. */
+export function cropOptionsWithBinarizer(
+  base: ReaderOptions,
+  binarizer: (typeof BINARIZER_PASSES)[number],
+): ReaderOptions {
+  return { ...base, binarizer };
+}
+
+export { BINARIZER_PASSES };

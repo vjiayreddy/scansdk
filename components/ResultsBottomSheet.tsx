@@ -5,7 +5,7 @@ import { X } from "lucide-react";
 
 import { BarcodeResults } from "@/components/BarcodeResults";
 import { Button } from "@/components/ui/button";
-import type { ScanDetection } from "@/lib/barcode/types";
+import type { ImageSize, ScanDetection } from "@/lib/barcode/types";
 import { cn } from "@/lib/utils";
 
 type ResultsBottomSheetProps = {
@@ -13,7 +13,10 @@ type ResultsBottomSheetProps = {
   onClose: () => void;
   barcodes: ScanDetection[];
   durationMs?: number;
+  file?: File | null;
+  imageSize?: ImageSize;
   title?: string;
+  subtitle?: string;
 };
 
 export function ResultsBottomSheet({
@@ -21,7 +24,10 @@ export function ResultsBottomSheet({
   onClose,
   barcodes,
   durationMs,
-  title = "Located barcodes",
+  file = null,
+  imageSize,
+  title = "Detected barcodes",
+  subtitle,
 }: ResultsBottomSheetProps) {
   const titleId = useId();
   const panelRef = useRef<HTMLDivElement>(null);
@@ -83,9 +89,11 @@ export function ResultsBottomSheet({
               {title}
               {barcodes.length > 0 ? `: ${barcodes.length}` : ""}
             </h2>
-            {durationMs !== undefined ? (
+            {subtitle ? (
+              <p className="mt-0.5 text-xs text-muted">{subtitle}</p>
+            ) : durationMs !== undefined ? (
               <p className="mt-0.5 text-xs text-muted">
-                Located in {durationMs} ms
+                Scanned in {durationMs} ms
               </p>
             ) : null}
           </div>
@@ -101,7 +109,13 @@ export function ResultsBottomSheet({
           </Button>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
-          <BarcodeResults barcodes={barcodes} durationMs={durationMs} compact />
+          <BarcodeResults
+            barcodes={barcodes}
+            durationMs={durationMs}
+            file={file}
+            imageSize={imageSize}
+            compact
+          />
         </div>
       </div>
     </div>

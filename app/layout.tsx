@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "ScanSDK — Barcode Scanner",
-  description: "Upload an image to detect barcodes in your browser.",
+  description: "Upload an image to locate and read barcodes in your browser.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

@@ -72,12 +72,35 @@ export function useBarcodeScanner(): UseBarcodeScannerResult {
               ? "locating"
               : "loading-wasm"
             : isReady
-              ? "scanning"
+              ? "locating"
               : "loading-wasm",
       );
 
       try {
-        const result = await scanImage(file, mode);
+        const result = await scanImage(file, mode, {
+          onPhase: (update) => {
+            if (scanId !== scanIdRef.current) {
+              return;
+            }
+
+            if (update.phase === "locating") {
+              setStatus(mode === "hard" ? "scanning-hard" : "locating");
+              return;
+            }
+
+            if (update.phase === "located" && update.partial) {
+              setResults(update.partial);
+              return;
+            }
+
+            if (update.phase === "reading") {
+              setStatus(mode === "hard" ? "scanning-hard" : "scanning");
+              if (update.partial) {
+                setResults(update.partial);
+              }
+            }
+          },
+        });
 
         if (scanId !== scanIdRef.current) {
           return null;

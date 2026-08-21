@@ -508,6 +508,13 @@ function renderOverlayShape(barcode: ScanDetection, index: number) {
       ? "#ef4444"
       : DETECT_STROKE_READ;
   const strokeWidth = Math.max(2, Math.min(box.width, box.height) * 0.035);
+  const glyphSize = Math.max(
+    16,
+    Math.min(box.width, box.height) * (locateOnly ? 0 : 0.42),
+  );
+  const cx = box.x + box.width / 2;
+  const cy = box.y + box.height / 2;
+  const glyphStroke = Math.max(2.5, glyphSize * 0.12);
 
   return (
     <g key={`${barcode.rawValue}-${index}`}>
@@ -531,6 +538,40 @@ function renderOverlayShape(barcode: ScanDetection, index: number) {
           strokeWidth={strokeWidth}
         />
       )}
+      {hasBox && !locateOnly ? (
+        unread ? (
+          <g
+            aria-hidden
+            stroke="#ffffff"
+            strokeWidth={glyphStroke}
+            strokeLinecap="round"
+            fill="none"
+          >
+            <line
+              x1={cx - glyphSize / 2}
+              y1={cy - glyphSize / 2}
+              x2={cx + glyphSize / 2}
+              y2={cy + glyphSize / 2}
+            />
+            <line
+              x1={cx + glyphSize / 2}
+              y1={cy - glyphSize / 2}
+              x2={cx - glyphSize / 2}
+              y2={cy + glyphSize / 2}
+            />
+          </g>
+        ) : (
+          <polyline
+            aria-hidden
+            points={`${cx - glyphSize * 0.35},${cy} ${cx - glyphSize * 0.08},${cy + glyphSize * 0.32} ${cx + glyphSize * 0.4},${cy - glyphSize * 0.32}`}
+            fill="none"
+            stroke="#ffffff"
+            strokeWidth={glyphStroke}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        )
+      ) : null}
       {hasBox ? (
         <text
           x={box.x + strokeWidth}

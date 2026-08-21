@@ -28,6 +28,15 @@ export interface ScanResult {
   imageSize: ImageSize;
 }
 
+/** Progress phases emitted by scanImage during YOLO+decode. */
+export type ScanPhase = "locating" | "located" | "reading";
+
+export type ScanPhaseUpdate = {
+  phase: ScanPhase;
+  /** Partial locate boxes (original-image coords) while reading starts. */
+  partial?: ScanResult;
+};
+
 export type ScannerStatus =
   | "idle"
   | "loading-wasm"

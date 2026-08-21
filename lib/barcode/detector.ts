@@ -2,15 +2,20 @@ import { prepareZXingModule } from "barcode-detector/ponyfill";
 
 import { scanLocatedRegions } from "./crop-scan";
 import { prepareCanvasFromFile } from "./preprocess";
-import { createDeadlineForMode } from "./scan-budget";
+import { createDeadlineForYoloDecode } from "./scan-budget";
 import { scanCanvas } from "./tile-scan";
 import type {
   DetectedBarcode,
   ScanDetection,
   ScanMode,
+  ScanPhaseUpdate,
   ScanResult,
 } from "./types";
 import { getYoloLoadError, isYoloAvailable, locateBarcodes, type YoloBox } from "./yolo-locate";
+
+export type ScanImageOptions = {
+  onPhase?: (update: ScanPhaseUpdate) => void;
+};
 
 let wasmPrepared = false;
 
@@ -142,26 +147,60 @@ function mergeYoloAndDecoded(
 async function scanWithYolo(
   canvas: HTMLCanvasElement,
   mode: ScanMode,
+  originalSize: { width: number; height: number },
+  start: number,
+  onPhase?: (update: ScanPhaseUpdate) => void,
 ): Promise<ScanDetection[] | null> {
+  onPhase?.({ phase: "locating" });
   const located = await locateBarcodes(canvas);
   if (located.length === 0) {
     return null;
   }
 
-  const deadline = createDeadlineForMode(mode);
+  const locatedDetections = mapCanvasCoordsToOriginal(
+    located.map((box) => yoloBoxToDetection(box, "located")),
+    canvas.width,
+    canvas.height,
+    originalSize.width,
+    originalSize.height,
+  );
+
+  const partial: ScanResult = {
+    barcodes: locatedDetections,
+    durationMs: Math.round(performance.now() - start),
+    imageSize: originalSize,
+  };
+  onPhase?.({ phase: "located", partial });
+  onPhase?.({ phase: "reading", partial });
+
+  const deadline = createDeadlineForYoloDecode(mode, located.length);
   const decoded = await scanLocatedRegions(canvas, located, deadline, {
     hardMode: mode === "hard",
   });
 
-  return mergeYoloAndDecoded(located, decoded);
+  let merged = mergeYoloAndDecoded(located, decoded);
+  const readCount = merged.filter((item) => item.status === "read").length;
+
+  // YOLO crops can miss soft/compressed Data Matrix; tile/proposal pass recovers more.
+  // scanCanvas has its own deadline — do not gate on YOLO budget remaining.
+  if (readCount < Math.max(1, Math.ceil(located.length * 0.35))) {
+    const fallback = await scanCanvas(canvas, { mode });
+    if (fallback.length > 0) {
+      merged = mergeYoloAndDecoded(located, [...decoded, ...fallback]);
+    }
+  }
+
+  return merged;
 }
 
 export async function scanImage(
   file: File,
   mode: ScanMode = "normal",
+  options?: ScanImageOptions,
 ): Promise<ScanResult> {
   const start = performance.now();
   prepareWasm();
+  const onPhase = options?.onPhase;
 
   const { canvas, originalSize } = await prepareCanvasFromFile(file);
 
@@ -174,6 +213,7 @@ export async function scanImage(
       );
     }
 
+    onPhase?.({ phase: "locating" });
     const located = await locateBarcodes(canvas);
     const barcodes = mapCanvasCoordsToOriginal(
       located.map((box) => yoloBoxToDetection(box, "located")),
@@ -190,12 +230,21 @@ export async function scanImage(
     };
   }
 
-  const yoloDetections = await scanWithYolo(canvas, mode);
+  const yoloDetections = await scanWithYolo(
+    canvas,
+    mode,
+    originalSize,
+    start,
+    onPhase,
+  );
   const barcodes: ScanDetection[] =
     yoloDetections ??
-    (await scanCanvas(canvas, { mode })).map((barcode) =>
-      asRead(barcode, "proposal"),
-    );
+    (await (async () => {
+      onPhase?.({ phase: "reading" });
+      return (await scanCanvas(canvas, { mode })).map((barcode) =>
+        asRead(barcode, "proposal"),
+      );
+    })());
 
   const scaledBarcodes = mapCanvasCoordsToOriginal(
     barcodes,

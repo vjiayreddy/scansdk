@@ -31,8 +31,10 @@ import {
 import { proposeBottleLabelRegions, denseMicroGridProposals } from "./propose-bottle-labels";
 import { analyzeScene } from "./scene-analysis";
 import {
+  BINARIZER_PASSES,
   DATAMATRIX_CROP_OPTIONS,
   DATAMATRIX_HARD_CROP_OPTIONS,
+  cropOptionsWithBinarizer,
 } from "./reader-options";
 import {
   isExpired,
@@ -42,11 +44,11 @@ import {
 } from "./scan-budget";
 
 const CROP_PADDING = 0.45;
-const MIN_CROP_SIDE = 180;
-const MIN_UPSCALE = 2.5;
-const MIN_UPSCALE_BLUR = 4.5;
-const MIN_UPSCALE_TINY = 5.5;
-const TINY_PROPOSAL_SIDE = 56;
+const MIN_CROP_SIDE = 220;
+const MIN_UPSCALE = 3;
+const MIN_UPSCALE_BLUR = 5;
+const MIN_UPSCALE_TINY = 6.5;
+const TINY_PROPOSAL_SIDE = 64;
 const DESKEW_THRESHOLD_DEG = 4;
 const MAX_DESKEW_DEG = 15;
 const MAX_DESKEW_HARD_DEG = 30;
@@ -179,9 +181,36 @@ function mapCropPointToCanvas(
 async function decodeImageData(
   imageData: ImageData,
   options = DATAMATRIX_CROP_OPTIONS,
+  exhaustive = false,
 ): Promise<ReturnType<typeof mapReadResult>[]> {
-  const results = await readBarcodes(imageData, options);
-  return results
+  const binarizers = exhaustive
+    ? BINARIZER_PASSES
+    : (["LocalAverage"] as const);
+
+  for (const binarizer of binarizers) {
+    const results = await readBarcodes(
+      imageData,
+      cropOptionsWithBinarizer(options, binarizer),
+    );
+    const valid = results
+      .filter((result) => result.isValid && result.text.length > 0)
+      .map((result) => mapReadResult(result));
+    if (valid.length > 0) {
+      return valid;
+    }
+  }
+
+  if (!exhaustive) {
+    return [];
+  }
+
+  // Tight YOLO crops sometimes decode only as "pure" symbols.
+  const pure = await readBarcodes(imageData, {
+    ...options,
+    isPure: true,
+    tryDownscale: false,
+  });
+  return pure
     .filter((result) => result.isValid && result.text.length > 0)
     .map((result) => mapReadResult(result));
 }
@@ -190,7 +219,7 @@ async function decodeCropPasses(
   base: ImageData,
   hardMode = false,
 ): Promise<ReturnType<typeof mapReadResult>[]> {
-  const first = await decodeImageData(base);
+  const first = await decodeImageData(base, DATAMATRIX_CROP_OPTIONS, hardMode);
   if (first.length > 0) {
     return first;
   }
@@ -211,7 +240,7 @@ async function decodeCropPasses(
       hardMode && imageData !== base
         ? DATAMATRIX_HARD_CROP_OPTIONS
         : DATAMATRIX_CROP_OPTIONS;
-    const valid = await decodeImageData(imageData, options);
+    const valid = await decodeImageData(imageData, options, hardMode);
     if (valid.length > 0) {
       return valid;
     }
@@ -219,7 +248,11 @@ async function decodeCropPasses(
 
   if (hardMode) {
     for (const imageData of applyThresholdVariants(base)) {
-      const valid = await decodeImageData(imageData, DATAMATRIX_HARD_CROP_OPTIONS);
+      const valid = await decodeImageData(
+        imageData,
+        DATAMATRIX_HARD_CROP_OPTIONS,
+        true,
+      );
       if (valid.length > 0) {
         return valid;
       }
@@ -481,6 +514,7 @@ function upscaleRegion(
   source: HTMLCanvasElement,
   region: { x: number; y: number; width: number; height: number },
   minUpscale = MIN_UPSCALE,
+  smooth = false,
 ): { canvas: HTMLCanvasElement; scale: number } {
   const scale = Math.max(
     minUpscale,
@@ -494,7 +528,10 @@ function upscaleRegion(
     throw new Error("Canvas context unavailable");
   }
 
-  ctx.imageSmoothingEnabled = false;
+  ctx.imageSmoothingEnabled = smooth;
+  if (smooth) {
+    ctx.imageSmoothingQuality = "high";
+  }
   ctx.drawImage(
     source,
     region.x,
@@ -625,6 +662,36 @@ async function decodeProposal(
       cropCanvas.width,
       cropCanvas.height,
     );
+  }
+
+  // Soft JPEG packs often need bilinear upscale instead of nearest-neighbor.
+  if (remainingMs(deadline) > 60) {
+    const { canvas: smoothCanvas, scale: smoothScale } = upscaleRegion(
+      canvas,
+      region,
+      minUpscale,
+      true,
+    );
+    const smoothCtx = smoothCanvas.getContext("2d", { willReadFrequently: true });
+    if (smoothCtx) {
+      const smoothData = smoothCtx.getImageData(
+        0,
+        0,
+        smoothCanvas.width,
+        smoothCanvas.height,
+      );
+      decoded = await decodeCropPasses(smoothData, useHardPasses && !fastOnly);
+      if (decoded.length > 0) {
+        return mappedHits(
+          decoded,
+          region,
+          smoothScale,
+          0,
+          smoothCanvas.width,
+          smoothCanvas.height,
+        );
+      }
+    }
   }
 
   if (fastOnly) {
@@ -1000,20 +1067,100 @@ export async function scanUniformCrops(
   return decodeProposalsTwoPhase(canvas, proposals, deadline, knownHits, options);
 }
 
-/** Decode YOLO (or other) boxes as crop regions. */
+/** Decode YOLO (or other) boxes as crop regions — fast sweep, then deep on misses. */
 export async function scanLocatedRegions(
   canvas: HTMLCanvasElement,
   regions: Array<{ x: number; y: number; width: number; height: number; score?: number }>,
   deadline: number,
   options: CropScanOptions = {},
 ): Promise<DetectedBarcode[]> {
-  const proposals: RegionProposal[] = regions.map((region) => ({
-    x: Math.round(region.x),
-    y: Math.round(region.y),
-    width: Math.round(region.width),
-    height: Math.round(region.height),
-    score: Math.round((region.score ?? 1) * 100_000),
-  }));
+  const proposals: RegionProposal[] = regions
+    .map((region) => expandYoloRegion(region, canvas.width, canvas.height))
+    .map((region) => ({
+      x: Math.round(region.x),
+      y: Math.round(region.y),
+      width: Math.round(region.width),
+      height: Math.round(region.height),
+      score: Math.round((region.score ?? 1) * 100_000),
+    }))
+    // Higher-confidence / larger boxes first so budget favors likely wins.
+    .sort((a, b) => b.score - a.score || b.width * b.height - a.width * a.height);
 
-  return decodeProposals(canvas, proposals, deadline, [], options);
+  if (proposals.length === 0 || isExpired(deadline)) {
+    return [];
+  }
+
+  const fastOptions: CropScanOptions = { ...options, fastOnly: true };
+  const fastHits = await decodeProposals(
+    canvas,
+    proposals,
+    deadline,
+    [],
+    fastOptions,
+  );
+
+  if (isExpired(deadline) || options.fastOnly) {
+    return fastHits;
+  }
+
+  const missed = proposals.filter(
+    (proposal) => !proposalCoveredByHit(proposal, fastHits),
+  );
+  if (missed.length === 0 || remainingMs(deadline) < 200) {
+    return fastHits;
+  }
+
+  // Misses always get hard crop passes — normal mode previously skipped them.
+  const deepOptions: CropScanOptions = {
+    ...options,
+    fastOnly: false,
+    hardMode: true,
+  };
+  const deepHits = await decodeProposals(
+    canvas,
+    missed,
+    deadline,
+    fastHits,
+    deepOptions,
+  );
+
+  return dedupeBarcodes([...fastHits, ...deepHits]);
+}
+
+/** Grow YOLO boxes so quiet-zone / module edges aren't clipped. */
+function expandYoloRegion(
+  region: { x: number; y: number; width: number; height: number; score?: number },
+  canvasWidth: number,
+  canvasHeight: number,
+): { x: number; y: number; width: number; height: number; score?: number } {
+  const padX = Math.max(6, Math.round(region.width * 0.22));
+  const padY = Math.max(6, Math.round(region.height * 0.22));
+  const x = clamp(region.x - padX, 0, canvasWidth - 1);
+  const y = clamp(region.y - padY, 0, canvasHeight - 1);
+  const right = clamp(region.x + region.width + padX, x + 1, canvasWidth);
+  const bottom = clamp(region.y + region.height + padY, y + 1, canvasHeight);
+  return {
+    x,
+    y,
+    width: right - x,
+    height: bottom - y,
+    score: region.score,
+  };
+}
+
+function proposalCoveredByHit(
+  proposal: RegionProposal,
+  hits: DetectedBarcode[],
+): boolean {
+  const pad = Math.max(8, Math.min(proposal.width, proposal.height) * 0.35);
+  const px = proposal.x - pad;
+  const py = proposal.y - pad;
+  const pw = proposal.width + pad * 2;
+  const ph = proposal.height + pad * 2;
+
+  return hits.some((hit) => {
+    const cx = hit.boundingBox.x + hit.boundingBox.width / 2;
+    const cy = hit.boundingBox.y + hit.boundingBox.height / 2;
+    return cx >= px && cy >= py && cx <= px + pw && cy <= py + ph;
+  });
 }
