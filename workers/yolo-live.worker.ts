@@ -40,7 +40,7 @@ type OutMsg =
 
 let session: import("onnxruntime-web").InferenceSession | null = null;
 let ortMod: typeof import("onnxruntime-web/wasm") | null = null;
-let imgsz = 640;
+let imgsz = 960;
 let pooledCanvas: OffscreenCanvas | null = null;
 let pooledCtx: OffscreenCanvasRenderingContext2D | null = null;
 let pooledTensor: Float32Array | null = null;
