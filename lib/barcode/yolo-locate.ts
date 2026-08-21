@@ -4,7 +4,9 @@ import type { InferenceSession, Tensor } from "onnxruntime-web";
 
 import {
   YOLO_IMGSZ,
+  YOLO_LIVE_CONF,
   YOLO_LIVE_IMGSZ,
+  YOLO_LIVE_MAX_BOXES,
   YOLO_LIVE_MODEL_URL,
   YOLO_MODEL_URL,
   YOLO_WASM_PATHS,
@@ -23,7 +25,9 @@ import {
 export type { YoloBox } from "@/lib/barcode/yolo-core";
 export {
   YOLO_IMGSZ,
+  YOLO_LIVE_CONF,
   YOLO_LIVE_IMGSZ,
+  YOLO_LIVE_MAX_BOXES,
   YOLO_LIVE_MODEL_URL,
   YOLO_MODEL_URL,
   YOLO_WASM_PATHS,
@@ -186,6 +190,7 @@ function parseYoloOutput(
   padY: number,
   canvasWidth: number,
   canvasHeight: number,
+  conf?: number,
 ): YoloBox[] {
   return parseYoloOutputData(
     output.data as Float32Array,
@@ -195,6 +200,7 @@ function parseYoloOutput(
     padY,
     canvasWidth,
     canvasHeight,
+    conf,
   );
 }
 
@@ -217,7 +223,24 @@ async function runLocate(
     return [];
   }
 
-  return parseYoloOutput(output, scale, padX, padY, width, height);
+  const boxes = parseYoloOutput(
+    output,
+    scale,
+    padX,
+    padY,
+    width,
+    height,
+    kind === "live" ? YOLO_LIVE_CONF : undefined,
+  );
+
+  if (kind === "live") {
+    return boxes
+      .slice()
+      .sort((a, b) => b.score - a.score)
+      .slice(0, YOLO_LIVE_MAX_BOXES);
+  }
+
+  return boxes;
 }
 
 /** Locate barcodes on a prepared canvas. Boxes are in canvas pixels. */
@@ -231,7 +254,7 @@ export async function locateBarcodes(
 
 /**
  * Locate barcodes directly from a video element.
- * Prefers the live Web Worker (640); falls back to main-thread 640 session.
+ * Prefers the live Web Worker (640); falls back to main-thread live session.
  * Boxes are in video intrinsic pixels.
  */
 export async function locateBarcodesFromVideo(

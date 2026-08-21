@@ -264,22 +264,31 @@ export function LiveScanPage() {
   }, [decodedBoxes, sourceRoi]);
 
   const overlayBarcodes = useMemo(
-    () => visibleBoxes.map(liveBoxToScanDetection),
+    () =>
+      // Live camera: hide unread (red X) clutter — keep pink locate + green read only.
+      visibleBoxes
+        .filter((box) => box.status !== "unread")
+        .map(liveBoxToScanDetection),
     [visibleBoxes],
   );
 
   const listBarcodes = useMemo(() => {
     // Prefer on-screen detections; keep unique reads even if track left frame.
+    // Skip unread noise in the list — failed decodes were flooding the UI.
     const byValue = new Map<string, ScanDetection>();
-    for (const barcode of overlayBarcodes) {
+    for (const box of visibleBoxes) {
+      if (box.status === "unread") {
+        continue;
+      }
+      const barcode = liveBoxToScanDetection(box);
       const key =
         barcode.status === "read" && barcode.rawValue
           ? `read:${barcode.rawValue}`
-          : `box:${barcode.boundingBox.x.toFixed(0)}:${barcode.boundingBox.y.toFixed(0)}:${barcode.status}`;
+          : `box:${barcode.trackId ?? `${barcode.boundingBox.x.toFixed(0)}:${barcode.boundingBox.y.toFixed(0)}`}:${barcode.status}`;
       byValue.set(key, barcode);
     }
     return Array.from(byValue.values());
-  }, [overlayBarcodes]);
+  }, [visibleBoxes]);
 
   const unreadCount = listBarcodes.filter((b) => b.status === "unread").length;
   const locatedCount = listBarcodes.filter(
@@ -449,7 +458,7 @@ export function LiveScanPage() {
             <LocateStatusStrip
               visible={running}
               statusLabel={statusLabel}
-              boxCount={visibleBoxes.length}
+              boxCount={overlayBarcodes.length}
               fps={fps}
               inferenceMs={inferenceMs}
               readCount={readCount}

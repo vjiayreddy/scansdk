@@ -21,6 +21,8 @@ type InitMsg = {
   modelUrl: string;
   imgsz: number;
   wasmPaths: string;
+  conf?: number;
+  maxBoxes?: number;
 };
 
 type LocateMsg = {
@@ -40,7 +42,9 @@ type OutMsg =
 
 let session: import("onnxruntime-web").InferenceSession | null = null;
 let ortMod: typeof import("onnxruntime-web/wasm") | null = null;
-let imgsz = 960;
+let imgsz = 640;
+let confThresh = 0.4;
+let maxBoxes = 8;
 let pooledCanvas: OffscreenCanvas | null = null;
 let pooledCtx: OffscreenCanvasRenderingContext2D | null = null;
 let pooledTensor: Float32Array | null = null;
@@ -85,6 +89,8 @@ function letterboxBitmap(
 
 async function handleInit(msg: InitMsg): Promise<void> {
   imgsz = msg.imgsz;
+  confThresh = msg.conf ?? 0.4;
+  maxBoxes = msg.maxBoxes ?? 8;
   ortMod = await import("onnxruntime-web/wasm");
   ortMod.env.wasm.numThreads = 1;
   ortMod.env.wasm.proxy = false;
@@ -135,7 +141,10 @@ async function handleLocate(msg: LocateMsg): Promise<OutMsg> {
       padY,
       sw,
       sh,
-    );
+      confThresh,
+    )
+      .sort((a, b) => b.score - a.score)
+      .slice(0, maxBoxes);
 
     return {
       type: "result",

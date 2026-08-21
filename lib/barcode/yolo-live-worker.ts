@@ -1,7 +1,9 @@
 "use client";
 
 import {
+  YOLO_LIVE_CONF,
   YOLO_LIVE_IMGSZ,
+  YOLO_LIVE_MAX_BOXES,
   YOLO_LIVE_MODEL_URL,
   YOLO_WASM_PATHS,
 } from "@/lib/barcode/yolo-config";
@@ -118,6 +120,8 @@ export async function warmLiveYoloWorker(): Promise<boolean> {
         type: "init",
         modelUrl: new URL(YOLO_LIVE_MODEL_URL, window.location.origin).href,
         imgsz: YOLO_LIVE_IMGSZ,
+        conf: YOLO_LIVE_CONF,
+        maxBoxes: YOLO_LIVE_MAX_BOXES,
         wasmPaths: new URL(YOLO_WASM_PATHS, window.location.origin).href,
       });
 
