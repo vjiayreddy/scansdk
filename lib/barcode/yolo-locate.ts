@@ -6,6 +6,7 @@ import {
   YOLO_IMGSZ,
   YOLO_LIVE_CONF,
   YOLO_LIVE_IMGSZ,
+  YOLO_LIVE_IOU,
   YOLO_LIVE_MAX_BOXES,
   YOLO_LIVE_MODEL_URL,
   YOLO_MODEL_URL,
@@ -27,6 +28,7 @@ export {
   YOLO_IMGSZ,
   YOLO_LIVE_CONF,
   YOLO_LIVE_IMGSZ,
+  YOLO_LIVE_IOU,
   YOLO_LIVE_MAX_BOXES,
   YOLO_LIVE_MODEL_URL,
   YOLO_MODEL_URL,
@@ -174,7 +176,7 @@ function letterboxFromSource(source: LetterboxSource, imgsz: number): Letterbox 
 
   ctx.fillStyle = "rgb(114, 114, 114)";
   ctx.fillRect(0, 0, imgsz, imgsz);
-  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingEnabled = false;
   ctx.drawImage(source, padX, padY, newWidth, newHeight);
 
   const { data } = ctx.getImageData(0, 0, imgsz, imgsz);
@@ -191,6 +193,7 @@ function parseYoloOutput(
   canvasWidth: number,
   canvasHeight: number,
   conf?: number,
+  iou?: number,
 ): YoloBox[] {
   return parseYoloOutputData(
     output.data as Float32Array,
@@ -201,7 +204,14 @@ function parseYoloOutput(
     canvasWidth,
     canvasHeight,
     conf,
+    iou,
   );
+}
+
+/** Prefer compact high-score boxes so large glare does not crowd out tiny DMs. */
+function liveBoxRank(box: YoloBox): number {
+  const area = Math.max(1, box.width * box.height);
+  return box.score * (1 + 48 / Math.sqrt(area));
 }
 
 async function runLocate(
@@ -231,12 +241,13 @@ async function runLocate(
     width,
     height,
     kind === "live" ? YOLO_LIVE_CONF : undefined,
+    kind === "live" ? YOLO_LIVE_IOU : undefined,
   );
 
   if (kind === "live") {
     return boxes
       .slice()
-      .sort((a, b) => b.score - a.score)
+      .sort((a, b) => liveBoxRank(b) - liveBoxRank(a))
       .slice(0, YOLO_LIVE_MAX_BOXES);
   }
 

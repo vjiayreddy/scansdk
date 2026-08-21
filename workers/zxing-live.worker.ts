@@ -37,7 +37,8 @@ const FAST_OPTIONS: ReaderOptions = {
   tryDenoise: false,
   tryRotate: true,
   tryInvert: true,
-  tryDownscale: true,
+  // Live crops are already upscaled — downscale would erase DM modules.
+  tryDownscale: false,
   maxNumberOfSymbols: 2,
   formats: ["DataMatrix", "QRCode", "EAN13", "Code128"],
   binarizer: "LocalAverage",
@@ -48,11 +49,14 @@ const ESCALATE_OPTIONS: ReaderOptions = {
   tryDenoise: true,
   tryRotate: true,
   tryInvert: true,
-  tryDownscale: true,
+  tryDownscale: false,
   maxNumberOfSymbols: 4,
+  // Pharma live: Data Matrix first (matches upload crop path that works).
   formats: ["DataMatrix", "QRCode", "EAN13", "EAN8", "Code128", "UPCA", "UPCE"],
   binarizer: "LocalAverage",
 };
+
+const BINARIZERS = ["GlobalHistogram", "FixedThreshold"] as const;
 
 let ready = false;
 let readBarcodesFn: typeof import("zxing-wasm/reader").readBarcodes | null =
@@ -147,6 +151,19 @@ async function handleDecode(msg: DecodeMsg): Promise<OutMsg> {
     if (hits.length === 0 && msg.escalate) {
       results = await readBarcodesFn(imageData, ESCALATE_OPTIONS);
       hits = hitsFromResults(results);
+    }
+    // Soft camera/screen modules often need alternate binarizers (upload path).
+    if (hits.length === 0 && msg.escalate) {
+      for (const binarizer of BINARIZERS) {
+        results = await readBarcodesFn(imageData, {
+          ...ESCALATE_OPTIONS,
+          binarizer,
+        });
+        hits = hitsFromResults(results);
+        if (hits.length > 0) {
+          break;
+        }
+      }
     }
 
     return { type: "result", id: msg.id, hits };

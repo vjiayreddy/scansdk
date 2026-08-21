@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 
 import { boxIou, type YoloBox } from "@/lib/barcode/yolo-core";
 import { isLiveDecodeBusy } from "@/lib/barcode/live-pipeline";
@@ -49,38 +49,69 @@ export type LiveTrackMeta = {
   score: number;
 };
 
+/**
+ * Pills-style IoU tracker state — snap bbox on match, coast last box on miss.
+ * No EMA / velocity (pills does not blend boxes).
+ */
 interface TrackedBox extends LiveYoloBox {
   miss: number;
-  /** Pixels per ms (video space). */
-  vx: number;
-  vy: number;
-  /** Consecutive matched detections (resets on miss). */
+  /** Consecutive matched detections (preserved across miss coast). */
   hits: number;
   lastCx: number;
   lastCy: number;
-  /** How much the center moved on the last match (for stability). */
+  /** How much the center moved on the last match (for decode stability). */
   lastDelta: number;
 }
 
-const MATCH_IOU = 0.3;
-/** Keep drawing a box this many failed frames after last hit (anti-flicker). */
-const MAX_MISS = 1;
-/** Blend new detection into previous pose — high = snappier follow. */
-const POS_BLEND = 0.75;
-/** Velocity EMA toward measured frame-to-frame motion. */
-const VEL_BLEND = 0.55;
-/** Decay velocity when held without a fresh detection. */
-const VEL_DECAY = 0.92;
-
-function blend(prev: number, next: number, amount = POS_BLEND): number {
-  return prev * (1 - amount) + next * amount;
-}
+/** Pills LIVE_PRECISION.trackIouMatch */
+const MATCH_IOU = 0.2;
+/** Pills LIVE_PRECISION.trackCenterMatchFactor × mean diagonal. */
+const MATCH_CENTER_FACTOR = 0.65;
+/** Confirm before first paint (anti ghost) — 2 hits @ ~2–3 FPS. */
+const MIN_HITS_TO_SHOW = 2;
+/**
+ * Keep track identity this many miss frames for rematch — but do NOT paint
+ * coasted boxes (barcode left frame must clear overlay immediately).
+ */
+const MAX_MISS = 6;
+/** Rematch jump larger than this × mean diag → treat as new object (drop read). */
+const JUMP_RESET_FACTOR = 0.75;
+/**
+ * Minimum gap between locate starts. On phones OrtRun ~1–2s; without a gap
+ * we queue continuous 960 inferences and starve decode/UI.
+ */
+const MIN_INFER_GAP_MS = 120;
+/** Extra gap while decode is busy so locate still runs but yields CPU. */
+const MIN_INFER_GAP_DECODE_BUSY_MS = 280;
 
 function centerOf(box: { x: number; y: number; width: number; height: number }): {
   cx: number;
   cy: number;
 } {
   return { cx: box.x + box.width / 2, cy: box.y + box.height / 2 };
+}
+
+function meanDiag(
+  a: { width: number; height: number },
+  b: { width: number; height: number },
+): number {
+  return (
+    (Math.hypot(a.width, a.height) + Math.hypot(b.width, b.height)) / 2
+  );
+}
+
+function matchQuality(track: TrackedBox, det: YoloBox): number {
+  const iou = boxIou(track, det);
+  if (iou >= MATCH_IOU) {
+    return iou;
+  }
+  const { cx: dcx, cy: dcy } = centerOf(det);
+  const dist = Math.hypot(dcx - track.lastCx, dcy - track.lastCy);
+  const thresh = meanDiag(track, det) * MATCH_CENTER_FACTOR;
+  if (dist > thresh) {
+    return -1;
+  }
+  return MATCH_IOU * (1 - dist / Math.max(1e-6, thresh)) * 0.99;
 }
 
 function toMeta(tracks: TrackedBox[]): LiveTrackMeta[] {
@@ -98,62 +129,53 @@ function toMeta(tracks: TrackedBox[]): LiveTrackMeta[] {
 }
 
 /**
- * Match detections to prior tracks by IoU, hold short misses, soft-blend pose,
- * and estimate per-track velocity for RAF extrapolation.
+ * Port of pills IoUTracker.update: greedy IoU/center match, snap bbox,
+ * coast last box, emit only after min hits.
  */
 function stabilizeTracks(
   previous: TrackedBox[],
   detections: YoloBox[],
   nextId: { current: number },
-  dtMs: number,
 ): TrackedBox[] {
-  const usedPrev = new Set<number>();
+  const tracks: TrackedBox[] = previous.map((track) => ({ ...track }));
+  const unmatchedTracks = new Set(tracks.map((_, i) => i));
   const usedDet = new Set<number>();
-  const next: TrackedBox[] = [];
-  const safeDt = Math.max(1, dtMs);
 
-  const pairs: { pi: number; di: number; iou: number }[] = [];
-  for (let pi = 0; pi < previous.length; pi += 1) {
+  const pairs: { ti: number; di: number; score: number }[] = [];
+  for (let ti = 0; ti < tracks.length; ti += 1) {
     for (let di = 0; di < detections.length; di += 1) {
-      const iou = boxIou(previous[pi]!, detections[di]!);
-      if (iou >= MATCH_IOU) {
-        pairs.push({ pi, di, iou });
+      const score = matchQuality(tracks[ti]!, detections[di]!);
+      if (score < 0) {
+        continue;
       }
+      pairs.push({ ti, di, score });
     }
   }
-  pairs.sort((a, b) => b.iou - a.iou);
+  pairs.sort((a, b) => b.score - a.score);
 
   for (const pair of pairs) {
-    if (usedPrev.has(pair.pi) || usedDet.has(pair.di)) {
+    if (!unmatchedTracks.has(pair.ti) || usedDet.has(pair.di)) {
       continue;
     }
-    usedPrev.add(pair.pi);
+    unmatchedTracks.delete(pair.ti);
     usedDet.add(pair.di);
-    const prev = previous[pair.pi]!;
+    const track = tracks[pair.ti]!;
     const det = detections[pair.di]!;
-    const x = blend(prev.x, det.x);
-    const y = blend(prev.y, det.y);
-    const width = blend(prev.width, det.width);
-    const height = blend(prev.height, det.height);
-    const { cx, cy } = centerOf({ x, y, width, height });
-    const measVx = (cx - prev.lastCx) / safeDt;
-    const measVy = (cy - prev.lastCy) / safeDt;
-    const lastDelta = Math.hypot(cx - prev.lastCx, cy - prev.lastCy);
-    next.push({
-      id: prev.id,
-      miss: 0,
-      hits: prev.hits + 1,
-      score: det.score,
-      x,
-      y,
-      width,
-      height,
-      vx: blend(prev.vx, measVx, VEL_BLEND),
-      vy: blend(prev.vy, measVy, VEL_BLEND),
-      lastCx: cx,
-      lastCy: cy,
-      lastDelta,
-    });
+    const { cx, cy } = centerOf(det);
+    const lastDelta = Math.hypot(cx - track.lastCx, cy - track.lastCy);
+    const jumpReset = lastDelta > meanDiag(track, det) * JUMP_RESET_FACTOR;
+    // Snap — pills does not EMA blend boxes.
+    track.x = det.x;
+    track.y = det.y;
+    track.width = det.width;
+    track.height = det.height;
+    track.score = det.score;
+    // Large teleport (e.g. barcode gone, face FP rematched) → re-confirm.
+    track.hits = jumpReset ? 1 : track.hits + 1;
+    track.miss = 0;
+    track.lastCx = cx;
+    track.lastCy = cy;
+    track.lastDelta = lastDelta;
   }
 
   for (let di = 0; di < detections.length; di += 1) {
@@ -162,68 +184,51 @@ function stabilizeTracks(
     }
     const det = detections[di]!;
     const { cx, cy } = centerOf(det);
-    next.push({
+    tracks.push({
       id: nextId.current++,
+      x: det.x,
+      y: det.y,
+      width: det.width,
+      height: det.height,
+      score: det.score,
       miss: 0,
       hits: 1,
-      ...det,
-      vx: 0,
-      vy: 0,
       lastCx: cx,
       lastCy: cy,
       lastDelta: 0,
     });
   }
 
-  for (let pi = 0; pi < previous.length; pi += 1) {
-    if (usedPrev.has(pi)) {
-      continue;
-    }
-    const prev = previous[pi]!;
-    const miss = prev.miss + 1;
-    if (miss <= MAX_MISS) {
-      next.push({
-        ...prev,
-        miss,
-        hits: 0,
-        vx: prev.vx * VEL_DECAY,
-        vy: prev.vy * VEL_DECAY,
-      });
+  const remaining: TrackedBox[] = [];
+  for (let ti = 0; ti < tracks.length; ti += 1) {
+    const track = tracks[ti]!;
+    // New tracks appended after previous.length were never in unmatchedTracks.
+    if (ti < previous.length && unmatchedTracks.has(ti)) {
+      track.miss += 1;
+      if (track.miss <= MAX_MISS) {
+        remaining.push(track);
+      }
+    } else {
+      remaining.push(track);
     }
   }
 
-  return next;
-}
-
-function extrapolateTracks(tracks: TrackedBox[], dtMs: number): TrackedBox[] {
-  if (dtMs <= 0 || tracks.length === 0) {
-    return tracks;
-  }
-  return tracks.map((track) => {
-    const dx = track.vx * dtMs;
-    const dy = track.vy * dtMs;
-    if (dx === 0 && dy === 0) {
-      return track;
-    }
-    return {
-      ...track,
-      x: track.x + dx,
-      y: track.y + dy,
-      lastCx: track.lastCx + dx,
-      lastCy: track.lastCy + dy,
-    };
-  });
+  return remaining;
 }
 
 function toPublicBoxes(tracks: TrackedBox[]): LiveYoloBox[] {
-  return tracks.map(({ id, x, y, width, height, score }) => ({
-    id,
-    x,
-    y,
-    width,
-    height,
-    score,
-  }));
+  // Paint only fresh hits — coast keeps identity in tracksRef but must not
+  // leave green/pink ghosts after the barcode leaves the frame.
+  return tracks
+    .filter((track) => track.hits >= MIN_HITS_TO_SHOW && track.miss === 0)
+    .map(({ id, x, y, width, height, score }) => ({
+      id,
+      x,
+      y,
+      width,
+      height,
+      score,
+    }));
 }
 
 /** Bail out of setState when motion is sub-pixel (prevents update-depth loops). */
@@ -269,15 +274,6 @@ function metaNearlyEqual(a: LiveTrackMeta[], b: LiveTrackMeta[]): boolean {
   return true;
 }
 
-const MIN_VEL = 0.015;
-/** Cap React publishes from extrapolation (~20 fps). */
-const EXTRAPOLATE_PUBLISH_MS = 50;
-/**
- * Minimum gap between locate starts. On phones OrtRun ~1–2s; without a gap
- * we queue continuous 960 inferences and starve decode/UI.
- */
-const MIN_INFER_GAP_MS = 120;
-
 export function useLiveYoloLocate({
   videoRef,
   enabled,
@@ -298,8 +294,6 @@ export function useLiveYoloLocate({
   const runGenerationRef = useRef(0);
   const requestIdRef = useRef(0);
   const lastInferAtRef = useRef(0);
-  const lastPaintAtRef = useRef(0);
-  const lastPublishAtRef = useRef(0);
 
   useEffect(() => {
     enabledRef.current = enabled;
@@ -320,14 +314,14 @@ export function useLiveYoloLocate({
     setTrackMeta((prev) => (metaNearlyEqual(prev, next) ? prev : next));
   };
 
-  const clearBoxes = () => {
+  const clearBoxes = useCallback(() => {
     runGenerationRef.current += 1;
     tracksRef.current = [];
     setBoxes([]);
     setTrackMeta([]);
     setFps(0);
     setInferenceMs(0);
-  };
+  }, []);
 
   useEffect(() => {
     if (!enabled) {
@@ -369,7 +363,6 @@ export function useLiveYoloLocate({
         }
 
         setStatus("running");
-        lastPaintAtRef.current = performance.now();
         lastInferAtRef.current = performance.now();
 
         const tick = () => {
@@ -380,41 +373,18 @@ export function useLiveYoloLocate({
           rafRef.current = requestAnimationFrame(tick);
 
           const now = performance.now();
-          const paintDt = now - lastPaintAtRef.current;
-          lastPaintAtRef.current = now;
 
-          // Extrapolate between inferences so boxes follow camera pan.
-          // Do NOT setState every RAF — that causes max-update-depth loops.
-          if (tracksRef.current.length > 0 && paintDt > 0 && paintDt < 100) {
-            let moving = false;
-            for (const track of tracksRef.current) {
-              if (Math.abs(track.vx) < MIN_VEL) {
-                track.vx = 0;
-              }
-              if (Math.abs(track.vy) < MIN_VEL) {
-                track.vy = 0;
-              }
-              if (track.vx !== 0 || track.vy !== 0) {
-                moving = true;
-              }
-            }
-            if (moving) {
-              tracksRef.current = extrapolateTracks(
-                tracksRef.current,
-                paintDt,
-              );
-              if (now - lastPublishAtRef.current >= EXTRAPOLATE_PUBLISH_MS) {
-                lastPublishAtRef.current = now;
-                publishBoxes(tracksRef.current);
-              }
-            }
-          }
-
-          if (busyRef.current || isLiveDecodeBusy()) {
+          // Only skip while a locate is in flight — never hard-block on decode
+          // busy (that starved coast/confirm and caused blink).
+          if (busyRef.current) {
             return;
           }
 
-          if (now - lastInferAtRef.current < MIN_INFER_GAP_MS) {
+          const decodeBusy = isLiveDecodeBusy();
+          const minGap = decodeBusy
+            ? MIN_INFER_GAP_DECODE_BUSY_MS
+            : MIN_INFER_GAP_MS;
+          if (now - lastInferAtRef.current < minGap) {
             return;
           }
 
@@ -426,7 +396,6 @@ export function useLiveYoloLocate({
           busyRef.current = true;
           const requestId = ++requestIdRef.current;
           const captureAt = performance.now();
-          const prevCaptureAt = lastInferAtRef.current;
           // Reserve the slot immediately so RAF does not pile up starts.
           lastInferAtRef.current = captureAt;
 
@@ -449,13 +418,11 @@ export function useLiveYoloLocate({
                 return;
               }
 
-              const inferDt = Math.max(1, captureAt - prevCaptureAt);
-
+              // Always update — including empty — so tracks coast via miss.
               tracksRef.current = stabilizeTracks(
                 tracksRef.current,
                 detections,
                 nextIdRef,
-                inferDt,
               );
 
               const times = frameTimesRef.current;
@@ -464,7 +431,6 @@ export function useLiveYoloLocate({
                 times.shift();
               }
 
-              lastPublishAtRef.current = performance.now();
               publishBoxes(tracksRef.current, true);
               publishMeta(tracksRef.current);
               setInferenceMs(Math.round(elapsed));

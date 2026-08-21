@@ -113,6 +113,10 @@ export function LiveScanPage() {
     [setRoiPresetId],
   );
 
+  const handleClearRoi = useCallback(() => {
+    setRoi(DEFAULT_ROI);
+  }, []);
+
   const {
     boxes,
     trackMeta,
@@ -151,6 +155,7 @@ export function LiveScanPage() {
 
   const {
     decodedBoxes,
+    reads,
     readCount,
     decoding,
     clearReads,
@@ -191,29 +196,41 @@ export function LiveScanPage() {
     }
   }, [flipFacing]);
 
+  // Keep live control handlers in refs so we register once (avoids effect
+  // churn on every locate tick that was resetting ROI chrome state).
+  const handleStartRef = useRef(handleStart);
+  const handleStopRef = useRef(handleStop);
+  const handleFlipRef = useRef(handleFlip);
+  handleStartRef.current = handleStart;
+  handleStopRef.current = handleStop;
+  handleFlipRef.current = handleFlip;
+
   useEffect(() => {
     registerLiveControls({
       onStart: () => {
-        void handleStart();
+        void handleStartRef.current();
       },
-      onStop: handleStop,
+      onStop: () => {
+        handleStopRef.current();
+      },
       onToggleFacing: () => {
-        void handleFlip();
+        void handleFlipRef.current();
       },
     });
     return () => {
       registerLiveControls(null);
     };
-  }, [handleFlip, handleStart, handleStop, registerLiveControls]);
+  }, [registerLiveControls]);
 
   useEffect(() => {
     registerRoiControls({
       onApplyPreset: handleApplyPreset,
+      onClear: handleClearRoi,
     });
     return () => {
       registerRoiControls(null);
     };
-  }, [handleApplyPreset, registerRoiControls]);
+  }, [handleApplyPreset, handleClearRoi, registerRoiControls]);
 
   useEffect(() => {
     setChromeRunning(ready);
@@ -263,32 +280,107 @@ export function LiveScanPage() {
     return decodedBoxes.filter((box) => boxIntersectsRoi(box, sourceRoi));
   }, [decodedBoxes, sourceRoi]);
 
-  const overlayBarcodes = useMemo(
-    () =>
-      // Live camera: hide unread (red X) clutter — keep pink locate + green read only.
-      visibleBoxes
-        .filter((box) => box.status !== "unread")
-        .map(liveBoxToScanDetection),
-    [visibleBoxes],
-  );
-
-  const listBarcodes = useMemo(() => {
-    // Prefer on-screen detections; keep unique reads even if track left frame.
-    // Skip unread noise in the list — failed decodes were flooding the UI.
-    const byValue = new Map<string, ScanDetection>();
+  const overlayBarcodes = useMemo(() => {
+    // Live camera: hide unread clutter; one overlay entity per track / value.
+    const seenTrack = new Set<number>();
+    const seenValue = new Set<string>();
+    const out: ReturnType<typeof liveBoxToScanDetection>[] = [];
     for (const box of visibleBoxes) {
       if (box.status === "unread") {
         continue;
       }
-      const barcode = liveBoxToScanDetection(box);
-      const key =
-        barcode.status === "read" && barcode.rawValue
-          ? `read:${barcode.rawValue}`
-          : `box:${barcode.trackId ?? `${barcode.boundingBox.x.toFixed(0)}:${barcode.boundingBox.y.toFixed(0)}`}:${barcode.status}`;
-      byValue.set(key, barcode);
+      if (seenTrack.has(box.id)) {
+        continue;
+      }
+      if (box.status === "read" && box.rawValue) {
+        if (seenValue.has(box.rawValue)) {
+          continue;
+        }
+        seenValue.add(box.rawValue);
+      }
+      seenTrack.add(box.id);
+      out.push(liveBoxToScanDetection(box));
+    }
+    return out;
+  }, [visibleBoxes]);
+
+  const listBarcodes = useMemo(() => {
+    // Stable unique results from session reads (not every live track tick).
+    const byValue = new Map<string, ScanDetection>();
+    for (const box of visibleBoxes) {
+      if (box.status !== "read" || !box.rawValue) {
+        continue;
+      }
+      byValue.set(box.rawValue, liveBoxToScanDetection(box));
+    }
+    for (const read of reads) {
+      if (byValue.has(read.rawValue)) {
+        continue;
+      }
+      const format = (read.format || "unknown") as ScanDetection["format"];
+      byValue.set(read.rawValue, {
+        rawValue: read.rawValue,
+        format,
+        boundingBox: { x: 0, y: 0, width: 0, height: 0 },
+        cornerPoints: [
+          { x: 0, y: 0 },
+          { x: 0, y: 0 },
+          { x: 0, y: 0 },
+          { x: 0, y: 0 },
+        ],
+        status: "read",
+        score: 1,
+        source: "yolo",
+        trackId: read.trackId,
+      });
     }
     return Array.from(byValue.values());
-  }, [visibleBoxes]);
+  }, [visibleBoxes, reads]);
+
+  // #region agent log
+  const renderCountRef = useRef(0);
+  const lastListSigRef = useRef("");
+  renderCountRef.current += 1;
+  {
+    const listSig = listBarcodes
+      .map(
+        (b) =>
+          `${b.status}:${b.trackId ?? "?"}:${b.rawValue?.slice(0, 12) ?? ""}:${Math.round(b.boundingBox.x)}:${Math.round(b.boundingBox.y)}`,
+      )
+      .join("|");
+    if (listSig !== lastListSigRef.current || renderCountRef.current % 30 === 1) {
+      const changed = listSig !== lastListSigRef.current;
+      lastListSigRef.current = listSig;
+      fetch(
+        "http://127.0.0.1:7835/ingest/0fbe70ba-5541-45af-9767-b65e9e5e5e90",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Debug-Session-Id": "45ff5c",
+          },
+          body: JSON.stringify({
+            sessionId: "45ff5c",
+            runId: "post-fix-5",
+            hypothesisId: "H4",
+            location: "LiveScanPage.tsx:render",
+            message: changed ? "list_sig_changed" : "page_render",
+            data: {
+              renders: renderCountRef.current,
+              listLen: listBarcodes.length,
+              overlayLen: overlayBarcodes.length,
+              readCount,
+              listSig: listSig.slice(0, 200),
+              fps,
+              inferenceMs,
+            },
+            timestamp: Date.now(),
+          }),
+        },
+      ).catch(() => {});
+    }
+  }
+  // #endregion
 
   const unreadCount = listBarcodes.filter((b) => b.status === "unread").length;
   const locatedCount = listBarcodes.filter(
@@ -375,7 +467,11 @@ export function LiveScanPage() {
             >
               {overlayBarcodes.map((barcode, index) => (
                 <DetectionOverlayShape
-                  key={`${barcode.status}-${index}-${barcode.boundingBox.x}-${barcode.boundingBox.y}`}
+                  key={
+                    barcode.trackId !== undefined
+                      ? `track-${barcode.trackId}`
+                      : `i-${index}-${barcode.rawValue || "loc"}`
+                  }
                   barcode={barcode}
                   index={index}
                 />

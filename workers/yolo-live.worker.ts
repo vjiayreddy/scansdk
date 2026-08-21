@@ -23,6 +23,7 @@ type InitMsg = {
   wasmPaths: string;
   conf?: number;
   maxBoxes?: number;
+  iou?: number;
 };
 
 type LocateMsg = {
@@ -43,11 +44,18 @@ type OutMsg =
 let session: import("onnxruntime-web").InferenceSession | null = null;
 let ortMod: typeof import("onnxruntime-web/wasm") | null = null;
 let imgsz = 960;
-let confThresh = 0.4;
-let maxBoxes = 8;
+let confThresh = 0.22;
+let iouThresh = 0.35;
+let maxBoxes = 40;
 let pooledCanvas: OffscreenCanvas | null = null;
 let pooledCtx: OffscreenCanvasRenderingContext2D | null = null;
 let pooledTensor: Float32Array | null = null;
+
+/** Prefer compact high-score boxes so large glare does not crowd out tiny DMs. */
+function liveBoxRank(box: YoloBox): number {
+  const area = Math.max(1, box.width * box.height);
+  return box.score * (1 + 48 / Math.sqrt(area));
+}
 
 function ensurePool(size: number): {
   ctx: OffscreenCanvasRenderingContext2D;
@@ -79,7 +87,8 @@ function letterboxBitmap(
   const { ctx, tensor } = ensurePool(size);
   ctx.fillStyle = "rgb(114, 114, 114)";
   ctx.fillRect(0, 0, size, size);
-  ctx.imageSmoothingEnabled = true;
+  // Nearest-ish draw keeps tiny DM modules sharper after downscale.
+  ctx.imageSmoothingEnabled = false;
   ctx.drawImage(bitmap, padX, padY, newWidth, newHeight);
 
   const { data } = ctx.getImageData(0, 0, size, size);
@@ -89,8 +98,9 @@ function letterboxBitmap(
 
 async function handleInit(msg: InitMsg): Promise<void> {
   imgsz = msg.imgsz;
-  confThresh = msg.conf ?? 0.4;
-  maxBoxes = msg.maxBoxes ?? 8;
+  confThresh = msg.conf ?? 0.22;
+  iouThresh = msg.iou ?? 0.35;
+  maxBoxes = msg.maxBoxes ?? 40;
   ortMod = await import("onnxruntime-web/wasm");
   ortMod.env.wasm.numThreads = 1;
   ortMod.env.wasm.proxy = false;
@@ -142,8 +152,9 @@ async function handleLocate(msg: LocateMsg): Promise<OutMsg> {
       sw,
       sh,
       confThresh,
+      iouThresh,
     )
-      .sort((a, b) => b.score - a.score)
+      .sort((a, b) => liveBoxRank(b) - liveBoxRank(a))
       .slice(0, maxBoxes);
 
     return {

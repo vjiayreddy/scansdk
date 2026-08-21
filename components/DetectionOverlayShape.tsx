@@ -40,7 +40,7 @@ export function DetectionOverlayShape({
   const glyphStroke = Math.max(2.5, glyphSize * 0.12);
 
   return (
-    <g key={`${barcode.status}-${barcode.rawValue || index}-${index}`}>
+    <g>
       {hasBox ? (
         <rect
           x={box.x}

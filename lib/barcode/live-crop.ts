@@ -1,9 +1,14 @@
 /**
- * Live crop geometry: light pad + max edge cap (no upload double-padding).
+ * Live crop geometry: light pad + content-aware upscale (no upload double-padding).
  */
 
-export const LIVE_YOLO_PAD = 0.12;
-export const LIVE_MAX_CROP_EDGE = 640;
+export const LIVE_YOLO_PAD = 0.2;
+export const LIVE_MAX_CROP_EDGE = 720;
+/**
+ * Upscale so the *YOLO detection* (not the padded crop) reaches this min edge.
+ * Padding-then-upscale left ~40px barcodes at ~63px on a 256 canvas — too small for DM.
+ */
+export const LIVE_MIN_CONTENT_EDGE = 288;
 
 export type LiveCropRect = {
   x: number;
@@ -16,7 +21,7 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
-/** Expand a YOLO box ~12% for quiet zone without the upload 22%+45% stack. */
+/** Expand a YOLO box for quiet zone only (do not inflate to a large source pad). */
 export function expandLiveYoloRegion(
   region: { x: number; y: number; width: number; height: number },
   frameWidth: number,
@@ -37,21 +42,44 @@ export function expandLiveYoloRegion(
   };
 }
 
+export type DrawLiveCropOptions = {
+  /** Raw YOLO box width — used so upscale targets the code, not the pad. */
+  contentWidth?: number;
+  /** Raw YOLO box height. */
+  contentHeight?: number;
+  maxEdge?: number;
+  minContentEdge?: number;
+};
+
 /**
- * Draw a video crop onto a canvas, scaling so the longest edge ≤ maxEdge.
- * Returns scale from crop-canvas pixels back toward source crop pixels
- * (sourceCrop * scale = canvas size).
+ * Draw a video crop onto a canvas.
+ * Scale is chosen so the YOLO content min-edge ≈ minContentEdge (capped by maxEdge).
  */
 export function drawLiveCrop(
   video: HTMLVideoElement,
   crop: LiveCropRect,
   canvas: HTMLCanvasElement,
-  maxEdge = LIVE_MAX_CROP_EDGE,
-): { scale: number; width: number; height: number } {
+  options: DrawLiveCropOptions = {},
+): { scale: number; width: number; height: number; contentEdge: number } {
+  const maxEdge = options.maxEdge ?? LIVE_MAX_CROP_EDGE;
+  const minContentEdge = options.minContentEdge ?? LIVE_MIN_CONTENT_EDGE;
+  const contentMin = Math.max(
+    1,
+    Math.min(
+      options.contentWidth ?? crop.width,
+      options.contentHeight ?? crop.height,
+    ),
+  );
+
+  let scale = minContentEdge / contentMin;
   const longest = Math.max(crop.width, crop.height);
-  const scale = longest > maxEdge ? maxEdge / longest : 1;
+  if (longest * scale > maxEdge) {
+    scale = maxEdge / longest;
+  }
+
   const width = Math.max(1, Math.round(crop.width * scale));
   const height = Math.max(1, Math.round(crop.height * scale));
+  const contentEdge = Math.round(contentMin * scale);
 
   if (canvas.width !== width || canvas.height !== height) {
     canvas.width = width;
@@ -63,7 +91,7 @@ export function drawLiveCrop(
     throw new Error("Crop canvas context unavailable");
   }
 
-  ctx.imageSmoothingEnabled = scale < 1;
+  ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = "high";
   ctx.drawImage(
     video,
@@ -77,7 +105,7 @@ export function drawLiveCrop(
     height,
   );
 
-  return { scale, width, height };
+  return { scale, width, height, contentEdge };
 }
 
 /** Map a bbox from crop-canvas space into full video coordinates. */

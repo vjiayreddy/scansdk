@@ -3,6 +3,7 @@
 import {
   YOLO_LIVE_CONF,
   YOLO_LIVE_IMGSZ,
+  YOLO_LIVE_IOU,
   YOLO_LIVE_MAX_BOXES,
   YOLO_LIVE_MODEL_URL,
   YOLO_WASM_PATHS,
@@ -122,6 +123,7 @@ export async function warmLiveYoloWorker(): Promise<boolean> {
         imgsz: YOLO_LIVE_IMGSZ,
         conf: YOLO_LIVE_CONF,
         maxBoxes: YOLO_LIVE_MAX_BOXES,
+        iou: YOLO_LIVE_IOU,
         wasmPaths: new URL(YOLO_WASM_PATHS, window.location.origin).href,
       });
 

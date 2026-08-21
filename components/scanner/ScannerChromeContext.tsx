@@ -25,6 +25,7 @@ type LiveControls = {
 
 type RoiControls = {
   onApplyPreset: (id: RoiPresetId) => void;
+  onClear: () => void;
 };
 
 type ScannerChromeState = {
@@ -39,6 +40,8 @@ type ScannerChromeState = {
   setRoiEnabled: (enabled: boolean) => void;
   setRoiPresetId: (id: RoiPresetId | null) => void;
   applyRoiPreset: (id: RoiPresetId) => void;
+  toggleRoiEditing: () => void;
+  clearRoi: () => void;
   start: () => void;
   stop: () => void;
   toggleFacing: () => void;
@@ -62,10 +65,10 @@ export function ScannerChromeProvider({ children }: { children: ReactNode }) {
   const registerLiveControls = useCallback((controls: LiveControls | null) => {
     controlsRef.current = controls;
     if (!controls) {
+      // Only mark camera chrome as stopped. Do NOT reset ROI here —
+      // LiveScanPage re-registers controls when callbacks change (every
+      // locate tick), and resetting was undoing Edit ROI / Clear ROI.
       setRunning(false);
-      setRoiEditing(false);
-      setRoiEnabled(true);
-      setRoiPresetId(DEFAULT_ROI_PRESET);
     }
   }, []);
 
@@ -78,6 +81,24 @@ export function ScannerChromeProvider({ children }: { children: ReactNode }) {
     setRoiEditing(true);
     setRoiPresetId(id);
     roiControlsRef.current?.onApplyPreset(id);
+  }, []);
+
+  const toggleRoiEditing = useCallback(() => {
+    setRoiEnabled((enabled) => {
+      if (!enabled) {
+        setRoiEditing(true);
+        return true;
+      }
+      setRoiEditing((editing) => !editing);
+      return true;
+    });
+  }, []);
+
+  const clearRoi = useCallback(() => {
+    setRoiEditing(false);
+    setRoiEnabled(false);
+    setRoiPresetId(null);
+    roiControlsRef.current?.onClear();
   }, []);
 
   const start = useCallback(() => {
@@ -105,6 +126,8 @@ export function ScannerChromeProvider({ children }: { children: ReactNode }) {
       setRoiEnabled,
       setRoiPresetId,
       applyRoiPreset,
+      toggleRoiEditing,
+      clearRoi,
       start,
       stop,
       toggleFacing,
@@ -118,6 +141,8 @@ export function ScannerChromeProvider({ children }: { children: ReactNode }) {
       roiEnabled,
       roiPresetId,
       applyRoiPreset,
+      toggleRoiEditing,
+      clearRoi,
       start,
       stop,
       toggleFacing,

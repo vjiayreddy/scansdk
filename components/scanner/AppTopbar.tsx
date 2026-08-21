@@ -44,10 +44,9 @@ export function AppTopbar() {
     roiEditing,
     roiEnabled,
     roiPresetId,
-    setRoiEditing,
-    setRoiEnabled,
-    setRoiPresetId,
     applyRoiPreset,
+    toggleRoiEditing,
+    clearRoi,
     stop,
     toggleFacing,
   } = useScannerChrome();
@@ -77,25 +76,6 @@ export function AppTopbar() {
       document.removeEventListener("keydown", onKey);
     };
   }, [menuOpen]);
-
-  const toggleRoi = () => {
-    if (!roiEnabled) {
-      setRoiEnabled(true);
-      setRoiEditing(true);
-      return;
-    }
-    if (roiEditing) {
-      setRoiEditing(false);
-      return;
-    }
-    setRoiEditing(true);
-  };
-
-  const clearRoi = () => {
-    setRoiEditing(false);
-    setRoiEnabled(false);
-    setRoiPresetId(null);
-  };
 
   return (
     <header className="sticky top-0 z-40 flex h-14 shrink-0 items-center justify-between gap-2 border-b border-hairline bg-canvas px-3 pt-[env(safe-area-inset-top,0px)] dark:border-[var(--border)] dark:bg-[var(--background)] md:h-16 md:px-6">
@@ -141,7 +121,7 @@ export function AppTopbar() {
                         : "Edit ROI"
                   }
                   aria-pressed={roiEditing || roiEnabled}
-                  onClick={toggleRoi}
+                  onClick={toggleRoiEditing}
                 >
                   <Crop className="size-4" />
                 </Button>
@@ -234,7 +214,7 @@ export function AppTopbar() {
                     className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm font-medium text-ink hover:bg-surface-soft dark:text-[var(--foreground)] dark:hover:bg-[var(--surface)]"
                     onClick={() => {
                       setMenuOpen(false);
-                      toggleRoi();
+                      toggleRoiEditing();
                     }}
                   >
                     <Crop className="size-4 shrink-0" />

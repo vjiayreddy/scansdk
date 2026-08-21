@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  useCallback,
   useEffect,
   useRef,
   useState,
@@ -73,15 +74,16 @@ interface UseLiveRoiDecodeResult {
   lastNewReadAt: number;
 }
 
-const STABLE_HITS = 3;
-const STABLE_DELTA_RATIO = 0.18;
-const DECODE_COOLDOWN_MS = 150;
-const UNREAD_RETRY_MS = 400;
-const DECODE_POLL_MS = 120;
+/** Align with live YOLO minHitsToEmit. */
+const STABLE_HITS = 2;
+const STABLE_DELTA_RATIO = 0.35;
+const DECODE_COOLDOWN_MS = 80;
+const UNREAD_RETRY_MS = 600;
+const DECODE_POLL_MS = 100;
 /** Continuous native BarcodeDetector.detect(video) interval. */
-const NATIVE_VIDEO_POLL_MS = 100;
+const NATIVE_VIDEO_POLL_MS = 120;
 /** Paint red only after this many consecutive misses. */
-const FAILS_BEFORE_UNREAD = 2;
+const FAILS_BEFORE_UNREAD = 5;
 const MAX_CROPS_PER_BURST = 2;
 /** Synthetic track ids for native-only hits (no YOLO box). */
 const NATIVE_ID_BASE = 1_000_000;
@@ -98,13 +100,18 @@ function ensureCropCanvas(): HTMLCanvasElement {
 }
 
 function isStable(meta: LiveTrackMeta): boolean {
-  if (meta.miss > 0 || meta.hits < STABLE_HITS) {
+  // Decode only on fresh confirmed hits (same gate as overlay paint).
+  if (meta.miss > 0) {
     return false;
   }
-  if (meta.hits >= 4) {
-    return true;
+  if (meta.hits < STABLE_HITS) {
+    return false;
   }
   const size = Math.max(8, Math.min(meta.width, meta.height));
+  // First confirm frame is always eligible; after that, allow moderate motion.
+  if (meta.hits === STABLE_HITS) {
+    return true;
+  }
   return meta.lastDelta <= size * STABLE_DELTA_RATIO;
 }
 
@@ -205,7 +212,53 @@ export function useLiveRoiDecode({
     statusRef.current = statusById;
   }, [boxes, trackMeta, sourceRoi, roiEnabled, videoRef, statusById]);
 
-  const clearReads = () => {
+  // Only drop decode status when the track is fully gone (missed past
+  // MAX_MISS). Clearing on brief miss caused endless re-decode + duplicate reads.
+  useEffect(() => {
+    if (statusById.size === 0) {
+      return;
+    }
+    const metaIds = new Set(trackMeta.map((m) => m.id));
+    let changed = false;
+    const next = new Map(statusById);
+    for (const id of next.keys()) {
+      if (!metaIds.has(id)) {
+        next.delete(id);
+        changed = true;
+      }
+    }
+    if (changed) {
+      statusRef.current = next;
+      setStatusById(next);
+    }
+  }, [trackMeta, statusById]);
+
+  const appendUniqueReads = (incoming: LiveReadResult[]) => {
+    if (incoming.length === 0) {
+      return;
+    }
+    setReads((prev) => {
+      const seen = new Set(prev.map((r) => r.rawValue));
+      const fresh: LiveReadResult[] = [];
+      for (const read of incoming) {
+        const value = read.rawValue.trim();
+        if (!value || seen.has(value)) {
+          continue;
+        }
+        seen.add(value);
+        decodedValuesRef.current.add(value);
+        fresh.push({ ...read, rawValue: value });
+      }
+      if (fresh.length === 0) {
+        return prev;
+      }
+      // Flash only when something new landed.
+      queueMicrotask(() => setLastNewReadAt(Date.now()));
+      return [...fresh, ...prev];
+    });
+  };
+
+  const clearReads = useCallback(() => {
     setStatusById(new Map());
     setNativeExtraBoxes([]);
     setReads([]);
@@ -213,7 +266,7 @@ export function useLiveRoiDecode({
     attemptedAtRef.current = new Map();
     nativeIdByValueRef.current = new Map();
     setLastNewReadAt(0);
-  };
+  }, []);
 
   useEffect(() => {
     if (enabled) {
@@ -236,7 +289,9 @@ export function useLiveRoiDecode({
 
   /** Apply native hits: match YOLO tracks or spawn green native-only boxes. */
   ingestNativeHitsRef.current = (hits: NativeBarcodeHit[]) => {
+    // Empty frame → clear native-only ghosts immediately.
     if (hits.length === 0) {
+      setNativeExtraBoxes([]);
       return;
     }
 
@@ -314,7 +369,9 @@ export function useLiveRoiDecode({
           id = nativeNextIdRef.current++;
           nativeIdByValueRef.current.set(hit.rawValue, id);
         }
-        extras.push({
+        // One overlay box per value — duplicate native hits reuse the same id.
+        const existing = extras.findIndex((box) => box.id === id);
+        const nextBox: LiveDecodedBox = {
           id,
           x: hit.boundingBox.x,
           y: hit.boundingBox.y,
@@ -324,13 +381,18 @@ export function useLiveRoiDecode({
           status: "read",
           rawValue: hit.rawValue,
           format: hit.format,
-        });
+        };
+        if (existing >= 0) {
+          extras[existing] = nextBox;
+        } else {
+          extras.push(nextBox);
+        }
       }
 
-      if (!decodedValuesRef.current.has(hit.rawValue)) {
-        decodedValuesRef.current.add(hit.rawValue);
+      if (!decodedValuesRef.current.has(hit.rawValue.trim())) {
+        decodedValuesRef.current.add(hit.rawValue.trim());
         newReads.push({
-          rawValue: hit.rawValue,
+          rawValue: hit.rawValue.trim(),
           format: hit.format,
           trackId:
             bestId ??
@@ -346,10 +408,7 @@ export function useLiveRoiDecode({
       setStatusById(nextStatus);
     }
     setNativeExtraBoxes(extras);
-    if (newReads.length > 0) {
-      setReads((prev) => [...newReads, ...prev]);
-      setLastNewReadAt(Date.now());
-    }
+    appendUniqueReads(newReads);
   };
 
   // Continuous native BarcodeDetector.detect(video) — MDN live pattern.
@@ -373,6 +432,48 @@ export function useLiveRoiDecode({
       void (async () => {
         try {
           const hits = await detectNativeBarcodes(video);
+          // #region agent log
+          if (hits.length > 0 || Math.random() < 0.08) {
+            let supported: string[] | null = null;
+            try {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const Det = (window as any).BarcodeDetector;
+              if (Det?.getSupportedFormats) {
+                supported = await Det.getSupportedFormats();
+              }
+            } catch {
+              supported = null;
+            }
+            fetch(
+              "http://127.0.0.1:7835/ingest/0fbe70ba-5541-45af-9767-b65e9e5e5e90",
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "X-Debug-Session-Id": "45ff5c",
+                },
+                body: JSON.stringify({
+                  sessionId: "45ff5c",
+                  runId: "post-fix-5",
+                  hypothesisId: "H8_H15",
+                  location: "useLiveRoiDecode.ts:nativeVideo",
+                  message: "native_video_poll",
+                  data: {
+                    hitCount: hits.length,
+                    values: hits.slice(0, 3).map((h) => ({
+                      v: h.rawValue.slice(0, 20),
+                      f: h.format,
+                    })),
+                    avail: isNativeBarcodeDetectorAvailable(),
+                    supported: supported?.slice(0, 20) ?? null,
+                    hasDataMatrix: supported?.includes("data_matrix") ?? null,
+                  },
+                  timestamp: Date.now(),
+                }),
+              },
+            ).catch(() => {});
+          }
+          // #endregion
           if (!cancelled && hits.length > 0) {
             ingestNativeHitsRef.current(hits);
           }
@@ -416,17 +517,61 @@ export function useLiveRoiDecode({
       const useRoi = roiEnabledRef.current;
       const metaById = new Map(currentMeta.map((m) => [m.id, m]));
 
+      const unstableReasons: {
+        id: number;
+        hits: number;
+        miss: number;
+        delta: number;
+        reason: string;
+      }[] = [];
       const candidates = currentBoxes.filter((box) => {
         const meta = metaById.get(box.id);
         if (!meta || !isStable(meta)) {
+          unstableReasons.push({
+            id: box.id,
+            hits: meta?.hits ?? -1,
+            miss: meta?.miss ?? -1,
+            delta: Math.round(meta?.lastDelta ?? -1),
+            reason: !meta
+              ? "no_meta"
+              : meta.miss > 0
+                ? "miss"
+                : meta.hits < STABLE_HITS
+                  ? "hits"
+                  : "delta",
+          });
           return false;
         }
         if (useRoi && currentRoi && !boxIntersectsRoi(box, currentRoi)) {
+          unstableReasons.push({
+            id: box.id,
+            hits: meta.hits,
+            miss: meta.miss,
+            delta: Math.round(meta.lastDelta),
+            reason: "roi",
+          });
           return false;
         }
         const existing = statusRef.current.get(box.id);
         if (existing?.status === "read") {
           return false;
+        }
+        // Already captured this barcode value on another track — don't re-decode.
+        for (const status of statusRef.current.values()) {
+          if (
+            status.status === "read" &&
+            status.rawValue &&
+            decodedValuesRef.current.has(status.rawValue)
+          ) {
+            // Skip if this box heavily overlaps an already-read YOLO box.
+            const readBox = currentBoxes.find((b) => {
+              const st = statusRef.current.get(b.id);
+              return st?.status === "read" && st.rawValue === status.rawValue;
+            });
+            if (readBox && boxIou(box, readBox) >= 0.2) {
+              return false;
+            }
+          }
         }
         const lastAttempt = attemptedAtRef.current.get(box.id) ?? 0;
         if (
@@ -437,6 +582,40 @@ export function useLiveRoiDecode({
         }
         return true;
       });
+
+      // #region agent log
+      if (currentBoxes.length > 0 && Math.random() < 0.25) {
+        fetch(
+          "http://127.0.0.1:7835/ingest/0fbe70ba-5541-45af-9767-b65e9e5e5e90",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-Debug-Session-Id": "45ff5c",
+            },
+            body: JSON.stringify({
+              sessionId: "45ff5c",
+              runId: "post-fix-5",
+              hypothesisId: "H3",
+              location: "useLiveRoiDecode.ts:candidates",
+              message: "decode_candidate_gate",
+              data: {
+                boxes: currentBoxes.length,
+                candidates: candidates.length,
+                roi: useRoi,
+                unstable: unstableReasons.slice(0, 8),
+                statuses: [...statusRef.current.entries()].map(([id, s]) => ({
+                  id,
+                  status: s.status,
+                  fails: s.failCount,
+                })),
+              },
+              timestamp: Date.now(),
+            }),
+          },
+        ).catch(() => {});
+      }
+      // #endregion
 
       if (candidates.length === 0) {
         return;
@@ -476,21 +655,125 @@ export function useLiveRoiDecode({
               video.videoWidth,
               video.videoHeight,
             );
-            const { scale } = drawLiveCrop(video, crop, canvas);
+            const {
+              scale,
+              width: cropW,
+              height: cropH,
+              contentEdge,
+            } = drawLiveCrop(video, crop, canvas, {
+              contentWidth: box.width,
+              contentHeight: box.height,
+            });
+            // #region agent log
+            let cropStats: {
+              mean: number;
+              std: number;
+              min: number;
+              max: number;
+            } | null = null;
+            try {
+              const ctx = canvas.getContext("2d", { willReadFrequently: true });
+              if (ctx) {
+                const { data } = ctx.getImageData(0, 0, cropW, cropH);
+                let sum = 0;
+                let sumSq = 0;
+                let min = 255;
+                let max = 0;
+                const step = Math.max(1, Math.floor(data.length / 4 / 400));
+                let n = 0;
+                for (let i = 0; i < data.length; i += 4 * step) {
+                  const y =
+                    0.299 * data[i]! +
+                    0.587 * data[i + 1]! +
+                    0.114 * data[i + 2]!;
+                  sum += y;
+                  sumSq += y * y;
+                  if (y < min) min = y;
+                  if (y > max) max = y;
+                  n += 1;
+                }
+                const mean = n ? sum / n : 0;
+                cropStats = {
+                  mean: Math.round(mean),
+                  std: Math.round(
+                    n ? Math.sqrt(Math.max(0, sumSq / n - mean * mean)) : 0,
+                  ),
+                  min: Math.round(min),
+                  max: Math.round(max),
+                };
+              }
+            } catch {
+              cropStats = null;
+            }
+            // #endregion
             const bitmap = await createImageBitmap(canvas);
 
             const priorFails = nextStatus.get(box.id)?.failCount ?? 0;
-            const escalate = priorFails >= 1;
+            // Live FPS is low — always use the harder multi-format path.
+            const escalate = true;
 
             let hits: Awaited<ReturnType<typeof decodeCropBitmap>> = [];
+            let decodeError: string | null = null;
             try {
               hits = await decodeCropBitmap(bitmap, escalate);
-            } catch {
+            } catch (err: unknown) {
               hits = [];
+              decodeError =
+                err instanceof Error ? err.message : "decode threw";
             }
 
             const best = hits[0] ?? null;
+            // #region agent log
+            fetch(
+              "http://127.0.0.1:7835/ingest/0fbe70ba-5541-45af-9767-b65e9e5e5e90",
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "X-Debug-Session-Id": "45ff5c",
+                },
+                body: JSON.stringify({
+                  sessionId: "45ff5c",
+                  runId: "post-fix-5",
+                  hypothesisId: "H16",
+                  location: "useLiveRoiDecode.ts:decode",
+                  message: best?.rawValue ? "decode_success" : "decode_miss",
+                  data: {
+                    trackId: box.id,
+                    hitCount: hits.length,
+                    value: best?.rawValue?.slice(0, 24) ?? null,
+                    format: best?.format ?? null,
+                    escalate,
+                    priorFails,
+                    crop: {
+                      x: Math.round(crop.x),
+                      y: Math.round(crop.y),
+                      w: Math.round(crop.width),
+                      h: Math.round(crop.height),
+                    },
+                    canvas: {
+                      w: cropW,
+                      h: cropH,
+                      scale: Math.round(scale * 100) / 100,
+                      contentEdge,
+                    },
+                    cropStats,
+                    boxScore: Math.round(box.score * 100) / 100,
+                    boxRaw: {
+                      w: Math.round(box.width),
+                      h: Math.round(box.height),
+                    },
+                    video: { w: video.videoWidth, h: video.videoHeight },
+                    nativeAvail: isNativeBarcodeDetectorAvailable(),
+                    decodeError,
+                  },
+                  timestamp: Date.now(),
+                }),
+              },
+            ).catch(() => {});
+            // #endregion
             if (best?.rawValue) {
+              const value = best.rawValue.trim();
               const videoBox = mapCropBBoxToVideo(
                 best.boundingBox,
                 crop,
@@ -503,15 +786,15 @@ export function useLiveRoiDecode({
                 Number.isFinite(videoBox.y);
               nextStatus.set(box.id, {
                 status: "read",
-                rawValue: best.rawValue,
+                rawValue: value,
                 format: best.format,
                 failCount: 0,
                 refinedBox: usable ? videoBox : undefined,
               });
-              if (!decodedValuesRef.current.has(best.rawValue)) {
-                decodedValuesRef.current.add(best.rawValue);
+              if (!decodedValuesRef.current.has(value)) {
+                decodedValuesRef.current.add(value);
                 newReads.push({
-                  rawValue: best.rawValue,
+                  rawValue: value,
                   format: best.format,
                   trackId: box.id,
                   readAt: Date.now(),
@@ -534,10 +817,7 @@ export function useLiveRoiDecode({
             statusRef.current = nextStatus;
             setStatusById(nextStatus);
           }
-          if (newReads.length > 0) {
-            setReads((prev) => [...newReads, ...prev]);
-            setLastNewReadAt(Date.now());
-          }
+          appendUniqueReads(newReads);
         } finally {
           cooldownUntilRef.current = performance.now() + DECODE_COOLDOWN_MS;
           busyRef.current = false;
@@ -562,9 +842,20 @@ export function useLiveRoiDecode({
 
   const yoloDecoded: LiveDecodedBox[] = boxes.map((box) => {
     const info = statusById.get(box.id);
+    const meta = trackMeta.find((m) => m.id === box.id);
+    // Never paint a stale read on a coasting / unconfirmed track.
+    const fresh = meta !== undefined && meta.miss === 0 && meta.hits >= STABLE_HITS;
+    const status: LiveDecodeStatus = fresh
+      ? (info?.status ?? "located")
+      : "located";
     const refined = info?.refinedBox;
+    // Keep YOLO track box for locate paint — only swap geometry when read
+    // (avoids pink box jump when crop decode returns a different bbox).
     const useRefined =
-      refined !== undefined && refined.width > 2 && refined.height > 2;
+      status === "read" &&
+      refined !== undefined &&
+      refined.width > 2 &&
+      refined.height > 2;
     return {
       ...box,
       ...(useRefined
@@ -575,9 +866,9 @@ export function useLiveRoiDecode({
             height: refined.height,
           }
         : {}),
-      status: info?.status ?? "located",
-      rawValue: info?.rawValue,
-      format: info?.format,
+      status,
+      rawValue: status === "read" ? info?.rawValue : undefined,
+      format: status === "read" ? info?.format : undefined,
     };
   });
 
