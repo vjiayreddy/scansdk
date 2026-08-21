@@ -57,6 +57,7 @@ function liveBoxToScanDetection(box: LiveDecodedBox): ScanDetection {
     status: box.status,
     score: box.score,
     source: "yolo",
+    trackId: box.id,
   };
 }
 

@@ -15,6 +15,8 @@ export type ScanDetection = DetectedBarcode & {
   status: BarcodeStatus;
   score?: number;
   source?: "yolo" | "zxing-full" | "proposal";
+  /** Live track id — keeps crop thumbs frozen across frame jitter. */
+  trackId?: number;
 };
 
 export interface ImageSize {
