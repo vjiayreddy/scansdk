@@ -21,10 +21,9 @@ import { useScannerChrome } from "@/components/scanner/ScannerChromeContext";
 import { Button } from "@/components/ui/button";
 import { useCameraStream } from "@/hooks/useCameraStream";
 import {
-  useLiveRoiDecode,
-  type LiveDecodedBox,
-} from "@/hooks/useLiveRoiDecode";
-import { useLiveYoloLocate } from "@/hooks/useLiveYoloLocate";
+  useLiveYoloLocate,
+  type LiveYoloBox,
+} from "@/hooks/useLiveYoloLocate";
 import type { ScanDetection } from "@/lib/barcode/types";
 import {
   DEFAULT_ROI,
@@ -37,11 +36,10 @@ import {
 } from "@/lib/roi";
 import { cn } from "@/lib/utils";
 
-function liveBoxToScanDetection(box: LiveDecodedBox): ScanDetection {
-  const format = (box.format ?? "unknown") as ScanDetection["format"];
+function liveBoxToScanDetection(box: LiveYoloBox): ScanDetection {
   return {
-    rawValue: box.rawValue ?? "",
-    format,
+    rawValue: "",
+    format: "unknown",
     boundingBox: {
       x: box.x,
       y: box.y,
@@ -54,7 +52,7 @@ function liveBoxToScanDetection(box: LiveDecodedBox): ScanDetection {
       { x: box.x + box.width, y: box.y + box.height },
       { x: box.x, y: box.y + box.height },
     ],
-    status: box.status,
+    status: "located",
     score: box.score,
     source: "yolo",
     trackId: box.id,
@@ -93,7 +91,7 @@ export function LiveScanPage() {
   const autoStartedRef = useRef(false);
   const stageRef = useRef<HTMLDivElement>(null);
   const prevRoiHitRef = useRef(0);
-  const lastFlashReadAtRef = useRef(0);
+
   const handleRoiChange = useCallback(
     (next: NormalizedRoi) => {
       startTransition(() => {
@@ -119,7 +117,6 @@ export function LiveScanPage() {
 
   const {
     boxes,
-    trackMeta,
     fps,
     inferenceMs,
     status: locateStatus,
@@ -153,22 +150,6 @@ export function LiveScanPage() {
     videoSize.width,
   ]);
 
-  const {
-    decodedBoxes,
-    reads,
-    readCount,
-    decoding,
-    clearReads,
-    lastNewReadAt,
-  } = useLiveRoiDecode({
-    videoRef,
-    enabled: ready,
-    boxes,
-    trackMeta,
-    sourceRoi,
-    roiEnabled,
-  });
-
   const handleStart = useCallback(async () => {
     setStarting(true);
     try {
@@ -180,12 +161,11 @@ export function LiveScanPage() {
 
   const handleStop = useCallback(() => {
     clearBoxes();
-    clearReads();
     stop();
     setStarting(false);
     setSheetOpen(false);
     setRoiEditing(false);
-  }, [clearBoxes, clearReads, setRoiEditing, stop]);
+  }, [clearBoxes, setRoiEditing, stop]);
 
   const handleFlip = useCallback(async () => {
     setStarting(true);
@@ -275,118 +255,17 @@ export function LiveScanPage() {
 
   const visibleBoxes = useMemo(() => {
     if (!sourceRoi) {
-      return decodedBoxes;
+      return boxes;
     }
-    return decodedBoxes.filter((box) => boxIntersectsRoi(box, sourceRoi));
-  }, [decodedBoxes, sourceRoi]);
+    return boxes.filter((box) => boxIntersectsRoi(box, sourceRoi));
+  }, [boxes, sourceRoi]);
 
-  const overlayBarcodes = useMemo(() => {
-    // Live camera: hide unread clutter; one overlay entity per track / value.
-    const seenTrack = new Set<number>();
-    const seenValue = new Set<string>();
-    const out: ReturnType<typeof liveBoxToScanDetection>[] = [];
-    for (const box of visibleBoxes) {
-      if (box.status === "unread") {
-        continue;
-      }
-      if (seenTrack.has(box.id)) {
-        continue;
-      }
-      if (box.status === "read" && box.rawValue) {
-        if (seenValue.has(box.rawValue)) {
-          continue;
-        }
-        seenValue.add(box.rawValue);
-      }
-      seenTrack.add(box.id);
-      out.push(liveBoxToScanDetection(box));
-    }
-    return out;
-  }, [visibleBoxes]);
+  const locatedDetections = useMemo(
+    () => visibleBoxes.map(liveBoxToScanDetection),
+    [visibleBoxes],
+  );
 
-  const listBarcodes = useMemo(() => {
-    // Stable unique results from session reads (not every live track tick).
-    const byValue = new Map<string, ScanDetection>();
-    for (const box of visibleBoxes) {
-      if (box.status !== "read" || !box.rawValue) {
-        continue;
-      }
-      byValue.set(box.rawValue, liveBoxToScanDetection(box));
-    }
-    for (const read of reads) {
-      if (byValue.has(read.rawValue)) {
-        continue;
-      }
-      const format = (read.format || "unknown") as ScanDetection["format"];
-      byValue.set(read.rawValue, {
-        rawValue: read.rawValue,
-        format,
-        boundingBox: { x: 0, y: 0, width: 0, height: 0 },
-        cornerPoints: [
-          { x: 0, y: 0 },
-          { x: 0, y: 0 },
-          { x: 0, y: 0 },
-          { x: 0, y: 0 },
-        ],
-        status: "read",
-        score: 1,
-        source: "yolo",
-        trackId: read.trackId,
-      });
-    }
-    return Array.from(byValue.values());
-  }, [visibleBoxes, reads]);
-
-  // #region agent log
-  const renderCountRef = useRef(0);
-  const lastListSigRef = useRef("");
-  renderCountRef.current += 1;
-  {
-    const listSig = listBarcodes
-      .map(
-        (b) =>
-          `${b.status}:${b.trackId ?? "?"}:${b.rawValue?.slice(0, 12) ?? ""}:${Math.round(b.boundingBox.x)}:${Math.round(b.boundingBox.y)}`,
-      )
-      .join("|");
-    if (listSig !== lastListSigRef.current || renderCountRef.current % 30 === 1) {
-      const changed = listSig !== lastListSigRef.current;
-      lastListSigRef.current = listSig;
-      fetch(
-        "http://127.0.0.1:7835/ingest/0fbe70ba-5541-45af-9767-b65e9e5e5e90",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Debug-Session-Id": "45ff5c",
-          },
-          body: JSON.stringify({
-            sessionId: "45ff5c",
-            runId: "post-fix-5",
-            hypothesisId: "H4",
-            location: "LiveScanPage.tsx:render",
-            message: changed ? "list_sig_changed" : "page_render",
-            data: {
-              renders: renderCountRef.current,
-              listLen: listBarcodes.length,
-              overlayLen: overlayBarcodes.length,
-              readCount,
-              listSig: listSig.slice(0, 200),
-              fps,
-              inferenceMs,
-            },
-            timestamp: Date.now(),
-          }),
-        },
-      ).catch(() => {});
-    }
-  }
-  // #endregion
-
-  const unreadCount = listBarcodes.filter((b) => b.status === "unread").length;
-  const locatedCount = listBarcodes.filter(
-    (b) => b.status === "located",
-  ).length;
-  const totalCount = listBarcodes.length;
+  const boxCount = locatedDetections.length;
 
   useEffect(() => {
     if (!roiEnabled || !ready) {
@@ -403,30 +282,18 @@ export function LiveScanPage() {
     prevRoiHitRef.current = hit;
   }, [ready, roiEnabled, visibleBoxes.length]);
 
-  useEffect(() => {
-    if (!lastNewReadAt || lastNewReadAt === lastFlashReadAtRef.current) {
-      return;
-    }
-    lastFlashReadAtRef.current = lastNewReadAt;
-    setFlash(true);
-    const timer = window.setTimeout(() => setFlash(false), 450);
-    return () => window.clearTimeout(timer);
-  }, [lastNewReadAt]);
-
   const statusLabel =
     locateStatus === "loading-model"
       ? "Loading YOLO model…"
-      : decoding
-        ? "Reading…"
-        : locateStatus === "running"
-          ? roiEnabled
-            ? "Hold steady in ROI…"
-            : "Locating barcodes…"
-          : locateStatus === "error"
-            ? "Locate error"
-            : ready
-              ? "Camera ready"
-              : "Camera stopped";
+      : locateStatus === "running"
+        ? roiEnabled
+          ? "Hold steady in ROI…"
+          : "Locating barcodes…"
+        : locateStatus === "error"
+          ? "Locate error"
+          : ready
+            ? "Camera ready"
+            : "Camera stopped";
 
   const error = cameraError ?? locateError;
   const running = ready;
@@ -465,12 +332,12 @@ export function LiveScanPage() {
               preserveAspectRatio="xMidYMid slice"
               aria-hidden="true"
             >
-              {overlayBarcodes.map((barcode, index) => (
+              {locatedDetections.map((barcode, index) => (
                 <DetectionOverlayShape
                   key={
                     barcode.trackId !== undefined
                       ? `track-${barcode.trackId}`
-                      : `i-${index}-${barcode.rawValue || "loc"}`
+                      : `i-${index}`
                   }
                   barcode={barcode}
                   index={index}
@@ -509,7 +376,7 @@ export function LiveScanPage() {
                   Camera stopped
                 </p>
                 <p className="mx-auto mt-2 max-w-xs text-sm leading-relaxed text-muted">
-                  Start again to continue live locate and decode.
+                  Start again to continue live YOLO localization.
                 </p>
               </div>
               <Button
@@ -532,19 +399,19 @@ export function LiveScanPage() {
             </div>
           ) : null}
 
-          {running && totalCount > 0 ? (
+          {running && boxCount > 0 ? (
             <div className="pointer-events-auto absolute bottom-[max(5.5rem,env(safe-area-inset-bottom))] left-4 z-30 md:hidden">
               <Button
                 type="button"
                 size="icon"
                 variant="onColor"
                 className="relative size-12 rounded-full shadow-md ring-1 ring-hairline"
-                aria-label={`Show ${totalCount} results`}
+                aria-label={`Show ${boxCount} detections`}
                 onClick={() => setSheetOpen(true)}
               >
                 <List className="size-5" />
                 <span className="absolute -right-1 -top-1 inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-brand-pink px-1 text-[10px] font-semibold text-white">
-                  {totalCount}
+                  {boxCount}
                 </span>
               </Button>
             </div>
@@ -554,11 +421,9 @@ export function LiveScanPage() {
             <LocateStatusStrip
               visible={running}
               statusLabel={statusLabel}
-              boxCount={overlayBarcodes.length}
+              boxCount={boxCount}
               fps={fps}
               inferenceMs={inferenceMs}
-              readCount={readCount}
-              decoding={decoding}
             />
           </ScannerDock>
         </div>
@@ -567,12 +432,12 @@ export function LiveScanPage() {
       <aside className="hidden w-full max-w-md flex-col border-l border-[var(--border-soft)] bg-[var(--background)] md:flex">
         <div className="border-b border-[var(--border-soft)] px-5 py-4">
           <h2 className="text-base font-semibold text-ink dark:text-[var(--foreground)]">
-            Detected barcodes
-            {totalCount > 0 ? `: ${totalCount}` : ""}
+            Located regions
+            {boxCount > 0 ? `: ${boxCount}` : ""}
           </h2>
           <p className="text-sm text-[var(--muted)]">
             {running
-              ? `${readCount} read · ${unreadCount} unread · ${locatedCount} located`
+              ? "YOLO localization only — no barcode decode."
               : "Start the camera to begin localization."}
           </p>
         </div>
@@ -581,8 +446,7 @@ export function LiveScanPage() {
             metrics={[
               { label: "Locate FPS", value: fps },
               { label: "Inference ms", value: inferenceMs },
-              { label: "Boxes", value: visibleBoxes.length },
-              { label: "Reads", value: readCount },
+              { label: "Boxes", value: boxCount },
               {
                 label: "ROI",
                 value: roiEnabled ? (roiEditing ? "editing" : "on") : "off",
@@ -591,10 +455,11 @@ export function LiveScanPage() {
           />
           <div className="mt-4">
             <BarcodeResults
-              barcodes={listBarcodes}
+              barcodes={locatedDetections}
               media={mediaEl}
               imageSize={videoSize}
               compact
+              locateOnly
             />
           </div>
         </div>
@@ -603,15 +468,16 @@ export function LiveScanPage() {
       <ResultsBottomSheet
         open={sheetOpen}
         onClose={() => setSheetOpen(false)}
-        barcodes={listBarcodes}
+        barcodes={locatedDetections}
         media={mediaEl}
         imageSize={videoSize}
-        title="Detected barcodes"
+        title="Located regions"
         subtitle={
-          totalCount > 0
-            ? `${readCount} read · ${unreadCount} unread · ${locatedCount} located`
+          boxCount > 0
+            ? `${boxCount} YOLO ${boxCount === 1 ? "detection" : "detections"}`
             : undefined
         }
+        locateOnly
       />
     </div>
   );

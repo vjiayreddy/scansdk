@@ -16,6 +16,8 @@ interface BarcodeResultsProps {
   imageSize?: ImageSize;
   /** Tighter list for the scanner aside panel. */
   compact?: boolean;
+  /** YOLO localization only — no decode messaging. */
+  locateOnly?: boolean;
 }
 
 const CROP_PAD = 0.12;
@@ -180,6 +182,7 @@ export function BarcodeResults({
   file = null,
   media = null,
   compact = false,
+  locateOnly = false,
 }: BarcodeResultsProps) {
   const ordered = useMemo(() => {
     const read = barcodes.filter((barcode) => barcode.status === "read");
@@ -252,7 +255,8 @@ export function BarcodeResults({
           }
           // Live list: only freeze a still once the code is read/unread.
           // Located boxes move every frame and looked like a mini live camera.
-          if (barcode.status === "located") {
+          // Locate-only mode still shows a frozen crop so the sidebar is useful.
+          if (barcode.status === "located" && !locateOnly) {
             return null;
           }
         }
@@ -298,7 +302,7 @@ export function BarcodeResults({
     return () => {
       cancelled = true;
     };
-  }, [file, media, ordered, thumbKey]);
+  }, [file, locateOnly, media, ordered, thumbKey]);
 
   const thumbs =
     thumbState.key === thumbKey ? thumbState.thumbs : ordered.map(() => null);
@@ -318,10 +322,14 @@ export function BarcodeResults({
             compact ? "text-sm" : "text-base",
           )}
         >
-          No barcodes found in this image
+          {locateOnly
+            ? "No barcode regions located yet"
+            : "No barcodes found in this image"}
         </p>
         <p className="mt-2 text-sm text-muted">
-          Try a closer shot, better lighting, or Scan harder for blurry codes.
+          {locateOnly
+            ? "Point the camera at a barcode and hold steady."
+            : "Try a closer shot, better lighting, or Scan harder for blurry codes."}
         </p>
       </div>
     );
@@ -409,7 +417,9 @@ export function BarcodeResults({
                   <p className="text-sm text-muted">
                     {isUnread
                       ? "Located but decode failed — hold steady or move closer"
-                      : "Located — reading…"}
+                      : locateOnly
+                        ? "YOLO barcode region"
+                        : "Located — reading…"}
                   </p>
                 )}
               </div>

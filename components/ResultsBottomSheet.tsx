@@ -18,6 +18,7 @@ type ResultsBottomSheetProps = {
   imageSize?: ImageSize;
   title?: string;
   subtitle?: string;
+  locateOnly?: boolean;
 };
 
 export function ResultsBottomSheet({
@@ -30,6 +31,7 @@ export function ResultsBottomSheet({
   imageSize,
   title = "Detected barcodes",
   subtitle,
+  locateOnly = false,
 }: ResultsBottomSheetProps) {
   const titleId = useId();
   const panelRef = useRef<HTMLDivElement>(null);
@@ -118,6 +120,7 @@ export function ResultsBottomSheet({
             media={media}
             imageSize={imageSize}
             compact
+            locateOnly={locateOnly}
           />
         </div>
       </div>

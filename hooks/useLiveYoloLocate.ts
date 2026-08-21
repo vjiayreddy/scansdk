@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 
 import { boxIou, type YoloBox } from "@/lib/barcode/yolo-core";
-import { isLiveDecodeBusy } from "@/lib/barcode/live-pipeline";
 import {
   getYoloLoadError,
   isYoloAvailable,
@@ -78,11 +77,9 @@ const MAX_MISS = 6;
 const JUMP_RESET_FACTOR = 0.75;
 /**
  * Minimum gap between locate starts. On phones OrtRun ~1–2s; without a gap
- * we queue continuous 960 inferences and starve decode/UI.
+ * we queue continuous 960 inferences and starve the UI.
  */
 const MIN_INFER_GAP_MS = 120;
-/** Extra gap while decode is busy so locate still runs but yields CPU. */
-const MIN_INFER_GAP_DECODE_BUSY_MS = 280;
 
 function centerOf(box: { x: number; y: number; width: number; height: number }): {
   cx: number;
@@ -374,17 +371,12 @@ export function useLiveYoloLocate({
 
           const now = performance.now();
 
-          // Only skip while a locate is in flight — never hard-block on decode
-          // busy (that starved coast/confirm and caused blink).
+          // Only skip while a locate is in flight.
           if (busyRef.current) {
             return;
           }
 
-          const decodeBusy = isLiveDecodeBusy();
-          const minGap = decodeBusy
-            ? MIN_INFER_GAP_DECODE_BUSY_MS
-            : MIN_INFER_GAP_MS;
-          if (now - lastInferAtRef.current < minGap) {
+          if (now - lastInferAtRef.current < MIN_INFER_GAP_MS) {
             return;
           }
 
