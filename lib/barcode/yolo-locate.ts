@@ -3,6 +3,11 @@
 import type { InferenceSession, Tensor } from "onnxruntime-web";
 
 export const YOLO_IMGSZ = 960;
+/**
+ * Live letterbox size. Must match the ONNX model's fixed input
+ * (barcode-yolo11n.onnx expects 960×960 — dynamic axes not exported).
+ */
+export const YOLO_LIVE_IMGSZ = YOLO_IMGSZ;
 export const YOLO_CONF = 0.25;
 export const YOLO_IOU = 0.45;
 export const YOLO_MODEL_URL = "/models/barcode-yolo11n.onnx";
@@ -15,6 +20,11 @@ export interface YoloBox {
   score: number;
 }
 
+export interface LocateBarcodesOptions {
+  /** Ignored — ONNX model is fixed at YOLO_IMGSZ (960). Kept for API stability. */
+  imgsz?: number;
+}
+
 interface Letterbox {
   tensor: Float32Array;
   scale: number;
@@ -22,8 +32,20 @@ interface Letterbox {
   padY: number;
 }
 
+type LetterboxSource =
+  | HTMLCanvasElement
+  | HTMLVideoElement
+  | OffscreenCanvas
+  | ImageBitmap;
+
 let sessionPromise: Promise<InferenceSession> | null = null;
 let lastLoadError = "";
+
+/** Reused across frames to avoid alloc/GC every inference. */
+let pooledCanvas: HTMLCanvasElement | null = null;
+let pooledCtx: CanvasRenderingContext2D | null = null;
+let pooledTensor: Float32Array | null = null;
+let pooledImgsz = 0;
 
 export function getYoloLoadError(): string {
   return lastLoadError;
@@ -68,23 +90,47 @@ export async function isYoloAvailable(): Promise<boolean> {
   }
 }
 
-function letterboxFromCanvas(
-  source: HTMLCanvasElement,
-  imgsz: number,
-): Letterbox {
-  const scale = Math.min(imgsz / source.width, imgsz / source.height);
-  const newWidth = Math.round(source.width * scale);
-  const newHeight = Math.round(source.height * scale);
+function getSourceSize(source: LetterboxSource): { width: number; height: number } {
+  if (source instanceof HTMLVideoElement) {
+    return { width: source.videoWidth, height: source.videoHeight };
+  }
+  return { width: source.width, height: source.height };
+}
+
+function ensureLetterboxPool(imgsz: number): {
+  canvas: HTMLCanvasElement;
+  ctx: CanvasRenderingContext2D;
+  tensor: Float32Array;
+} {
+  if (!pooledCanvas || pooledImgsz !== imgsz) {
+    pooledCanvas = document.createElement("canvas");
+    pooledCanvas.width = imgsz;
+    pooledCanvas.height = imgsz;
+    pooledCtx = pooledCanvas.getContext("2d", { willReadFrequently: true });
+    pooledTensor = new Float32Array(3 * imgsz * imgsz);
+    pooledImgsz = imgsz;
+  }
+
+  if (!pooledCtx || !pooledTensor) {
+    throw new Error("Canvas context unavailable");
+  }
+
+  return { canvas: pooledCanvas, ctx: pooledCtx, tensor: pooledTensor };
+}
+
+function letterboxFromSource(source: LetterboxSource, imgsz: number): Letterbox {
+  const { width: sourceWidth, height: sourceHeight } = getSourceSize(source);
+  if (sourceWidth < 2 || sourceHeight < 2) {
+    throw new Error("Letterbox source has invalid dimensions");
+  }
+
+  const scale = Math.min(imgsz / sourceWidth, imgsz / sourceHeight);
+  const newWidth = Math.round(sourceWidth * scale);
+  const newHeight = Math.round(sourceHeight * scale);
   const padX = (imgsz - newWidth) / 2;
   const padY = (imgsz - newHeight) / 2;
 
-  const canvas = document.createElement("canvas");
-  canvas.width = imgsz;
-  canvas.height = imgsz;
-  const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  if (!ctx) {
-    throw new Error("Canvas context unavailable");
-  }
+  const { ctx, tensor } = ensureLetterboxPool(imgsz);
 
   ctx.fillStyle = "rgb(114, 114, 114)";
   ctx.fillRect(0, 0, imgsz, imgsz);
@@ -92,14 +138,13 @@ function letterboxFromCanvas(
   ctx.drawImage(source, padX, padY, newWidth, newHeight);
 
   const { data } = ctx.getImageData(0, 0, imgsz, imgsz);
-  const tensor = new Float32Array(3 * imgsz * imgsz);
   const plane = imgsz * imgsz;
 
   for (let index = 0; index < plane; index += 1) {
     const pixel = index * 4;
-    tensor[index] = data[pixel] / 255;
-    tensor[plane + index] = data[pixel + 1] / 255;
-    tensor[2 * plane + index] = data[pixel + 2] / 255;
+    tensor[index] = data[pixel]! / 255;
+    tensor[plane + index] = data[pixel + 1]! / 255;
+    tensor[2 * plane + index] = data[pixel + 2]! / 255;
   }
 
   return { tensor, scale, padX, padY };
@@ -172,7 +217,16 @@ function parseYoloOutput(
       ? data[4 * count + index]
       : data[index * channels + 4];
 
-    if (score < YOLO_CONF) {
+    if (score === undefined || score < YOLO_CONF) {
+      continue;
+    }
+
+    if (
+      cx === undefined ||
+      cy === undefined ||
+      width === undefined ||
+      height === undefined
+    ) {
       continue;
     }
 
@@ -196,14 +250,17 @@ function parseYoloOutput(
   );
 }
 
-/** Locate barcodes on a prepared canvas. Boxes are in canvas pixels. */
-export async function locateBarcodes(
-  source: HTMLCanvasElement,
+async function runLocate(
+  source: LetterboxSource,
+  _imgsz?: number,
 ): Promise<YoloBox[]> {
+  // Model graphs are fixed at YOLO_IMGSZ; ignore caller size to avoid OrtRun dim errors.
+  const imgsz = YOLO_IMGSZ;
+  const { width, height } = getSourceSize(source);
   const session = await loadSession();
   const ort = await import("onnxruntime-web/wasm");
-  const { tensor, scale, padX, padY } = letterboxFromCanvas(source, YOLO_IMGSZ);
-  const input = new ort.Tensor("float32", tensor, [1, 3, YOLO_IMGSZ, YOLO_IMGSZ]);
+  const { tensor, scale, padX, padY } = letterboxFromSource(source, imgsz);
+  const input = new ort.Tensor("float32", tensor, [1, 3, imgsz, imgsz]);
   const inputName = session.inputNames[0] ?? "images";
   const results = await session.run({ [inputName]: input });
   const outputName = session.outputNames[0];
@@ -213,12 +270,24 @@ export async function locateBarcodes(
     return [];
   }
 
-  return parseYoloOutput(
-    output,
-    scale,
-    padX,
-    padY,
-    source.width,
-    source.height,
-  );
+  return parseYoloOutput(output, scale, padX, padY, width, height);
+}
+
+/** Locate barcodes on a prepared canvas. Boxes are in canvas pixels. */
+export async function locateBarcodes(
+  source: HTMLCanvasElement,
+  options?: LocateBarcodesOptions,
+): Promise<YoloBox[]> {
+  return runLocate(source, options?.imgsz ?? YOLO_IMGSZ);
+}
+
+/**
+ * Locate barcodes directly from a video element (no full-res intermediate canvas).
+ * Boxes are in video intrinsic pixels.
+ */
+export async function locateBarcodesFromVideo(
+  video: HTMLVideoElement,
+  options?: LocateBarcodesOptions,
+): Promise<YoloBox[]> {
+  return runLocate(video, options?.imgsz ?? YOLO_LIVE_IMGSZ);
 }

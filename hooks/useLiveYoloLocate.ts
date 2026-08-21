@@ -5,7 +5,8 @@ import { useEffect, useRef, useState, type RefObject } from "react";
 import {
   getYoloLoadError,
   isYoloAvailable,
-  locateBarcodes,
+  locateBarcodesFromVideo,
+  YOLO_LIVE_IMGSZ,
   type YoloBox,
 } from "@/lib/barcode/yolo-locate";
 
@@ -31,17 +32,18 @@ interface UseLiveYoloLocateResult {
   inferenceMs: number;
   status: LiveLocateStatus;
   error: string | null;
+  clearBoxes: () => void;
 }
 
 interface TrackedBox extends LiveYoloBox {
   miss: number;
 }
 
-const MATCH_IOU = 0.25;
+const MATCH_IOU = 0.3;
 /** Keep drawing a box this many failed frames after last hit (anti-flicker). */
-const MAX_MISS = 8;
+const MAX_MISS = 2;
 /** Blend new detection into previous pose so the rect doesn't jump. */
-const POS_BLEND = 0.55;
+const POS_BLEND = 0.7;
 
 function boxIou(a: YoloBox, b: YoloBox): number {
   const ax2 = a.x + a.width;
@@ -135,16 +137,28 @@ export function useLiveYoloLocate({
   const [error, setError] = useState<string | null>(null);
 
   const busyRef = useRef(false);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const frameTimesRef = useRef<number[]>([]);
   const rafRef = useRef(0);
   const tracksRef = useRef<TrackedBox[]>([]);
   const nextIdRef = useRef(1);
+  const enabledRef = useRef(enabled);
+  const runGenerationRef = useRef(0);
+
+  enabledRef.current = enabled;
+
+  const clearBoxes = () => {
+    runGenerationRef.current += 1;
+    tracksRef.current = [];
+    setBoxes([]);
+    setFps(0);
+    setInferenceMs(0);
+  };
 
   useEffect(() => {
     if (!enabled) {
       cancelAnimationFrame(rafRef.current);
       busyRef.current = false;
+      runGenerationRef.current += 1;
       tracksRef.current = [];
       setBoxes([]);
       setFps(0);
@@ -155,13 +169,14 @@ export function useLiveYoloLocate({
     }
 
     let cancelled = false;
+    const generation = ++runGenerationRef.current;
 
     setStatus("loading-model");
     setError(null);
 
     isYoloAvailable()
       .then((ok) => {
-        if (cancelled) {
+        if (cancelled || generation !== runGenerationRef.current) {
           return;
         }
         if (!ok) {
@@ -173,7 +188,7 @@ export function useLiveYoloLocate({
         setStatus("running");
 
         const tick = () => {
-          if (cancelled) {
+          if (cancelled || generation !== runGenerationRef.current) {
             return;
           }
 
@@ -192,32 +207,17 @@ export function useLiveYoloLocate({
 
           void (async () => {
             try {
-              let canvas = canvasRef.current;
-              if (!canvas) {
-                canvas = document.createElement("canvas");
-                canvasRef.current = canvas;
-              }
-
-              if (
-                canvas.width !== video.videoWidth ||
-                canvas.height !== video.videoHeight
-              ) {
-                canvas.width = video.videoWidth;
-                canvas.height = video.videoHeight;
-              }
-
-              const ctx = canvas.getContext("2d", { willReadFrequently: true });
-              if (!ctx) {
-                throw new Error("Could not get 2D canvas context");
-              }
-
-              ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
               const started = performance.now();
-              const detections = await locateBarcodes(canvas);
+              const detections = await locateBarcodesFromVideo(video, {
+                imgsz: YOLO_LIVE_IMGSZ,
+              });
               const elapsed = performance.now() - started;
 
-              if (cancelled) {
+              if (
+                cancelled ||
+                !enabledRef.current ||
+                generation !== runGenerationRef.current
+              ) {
                 return;
               }
 
@@ -249,7 +249,11 @@ export function useLiveYoloLocate({
               setError(null);
               setStatus("running");
             } catch (err: unknown) {
-              if (cancelled) {
+              if (
+                cancelled ||
+                !enabledRef.current ||
+                generation !== runGenerationRef.current
+              ) {
                 return;
               }
               setStatus("error");
@@ -265,7 +269,7 @@ export function useLiveYoloLocate({
         rafRef.current = requestAnimationFrame(tick);
       })
       .catch((err: unknown) => {
-        if (cancelled) {
+        if (cancelled || generation !== runGenerationRef.current) {
           return;
         }
         setStatus("error");
@@ -281,5 +285,5 @@ export function useLiveYoloLocate({
     };
   }, [enabled, videoRef]);
 
-  return { boxes, fps, inferenceMs, status, error };
+  return { boxes, fps, inferenceMs, status, error, clearBoxes };
 }
