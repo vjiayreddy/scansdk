@@ -1,4 +1,6 @@
-import type { Tensor } from "onnxruntime-web";
+"use client";
+
+import type { InferenceSession, Tensor } from "onnxruntime-web";
 
 export const YOLO_IMGSZ = 960;
 export const YOLO_CONF = 0.25;
@@ -20,33 +22,50 @@ interface Letterbox {
   padY: number;
 }
 
-let sessionPromise: Promise<import("onnxruntime-web").InferenceSession | null> | null =
-  null;
+let sessionPromise: Promise<InferenceSession> | null = null;
+let lastLoadError = "";
 
-async function loadSession(): Promise<
-  import("onnxruntime-web").InferenceSession | null
-> {
+export function getYoloLoadError(): string {
+  return lastLoadError;
+}
+
+async function createSession(): Promise<InferenceSession> {
+  const ort = await import("onnxruntime-web/wasm");
+  ort.env.wasm.numThreads = 1;
+  ort.env.wasm.proxy = false;
+
+  const response = await fetch(YOLO_MODEL_URL);
+  if (!response.ok) {
+    throw new Error(`ONNX fetch failed (${response.status}) for ${YOLO_MODEL_URL}`);
+  }
+
+  const model = new Uint8Array(await response.arrayBuffer());
+  return ort.InferenceSession.create(model, {
+    executionProviders: ["wasm"],
+  });
+}
+
+async function loadSession(): Promise<InferenceSession> {
   if (!sessionPromise) {
-    sessionPromise = (async () => {
-      try {
-        const ort = await import("onnxruntime-web");
-        ort.env.wasm.wasmPaths = "/ort/";
-        ort.env.wasm.numThreads = 1;
-        return await ort.InferenceSession.create(YOLO_MODEL_URL, {
-          executionProviders: ["wasm"],
-        });
-      } catch {
-        return null;
-      }
-    })();
+    sessionPromise = createSession().catch((error: unknown) => {
+      sessionPromise = null;
+      lastLoadError =
+        error instanceof Error ? error.message : "YOLO session failed to start";
+      throw error;
+    });
   }
 
   return sessionPromise;
 }
 
 export async function isYoloAvailable(): Promise<boolean> {
-  const session = await loadSession();
-  return session !== null;
+  try {
+    await loadSession();
+    lastLoadError = "";
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function letterboxFromCanvas(
@@ -182,11 +201,7 @@ export async function locateBarcodes(
   source: HTMLCanvasElement,
 ): Promise<YoloBox[]> {
   const session = await loadSession();
-  if (!session) {
-    return [];
-  }
-
-  const ort = await import("onnxruntime-web");
+  const ort = await import("onnxruntime-web/wasm");
   const { tensor, scale, padX, padY } = letterboxFromCanvas(source, YOLO_IMGSZ);
   const input = new ort.Tensor("float32", tensor, [1, 3, YOLO_IMGSZ, YOLO_IMGSZ]);
   const inputName = session.inputNames[0] ?? "images";

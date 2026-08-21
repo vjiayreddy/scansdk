@@ -10,7 +10,7 @@ import type {
   ScanMode,
   ScanResult,
 } from "./types";
-import { isYoloAvailable, locateBarcodes, type YoloBox } from "./yolo-locate";
+import { getYoloLoadError, isYoloAvailable, locateBarcodes, type YoloBox } from "./yolo-locate";
 
 let wasmPrepared = false;
 
@@ -58,7 +58,10 @@ function detectionIou(
   return union <= 0 ? 0 : inter / union;
 }
 
-function yoloBoxToUnread(box: YoloBox): ScanDetection {
+function yoloBoxToDetection(
+  box: YoloBox,
+  status: Extract<ScanDetection["status"], "unread" | "located">,
+): ScanDetection {
   const x2 = box.x + box.width;
   const y2 = box.y + box.height;
 
@@ -77,7 +80,7 @@ function yoloBoxToUnread(box: YoloBox): ScanDetection {
       { x: x2, y: y2 },
       { x: box.x, y: y2 },
     ] as DetectedBarcode["cornerPoints"],
-    status: "unread",
+    status,
     score: box.score,
     source: "yolo",
   };
@@ -123,7 +126,7 @@ function mergeYoloAndDecoded(
       usedDecoded.add(bestIndex);
       detections.push(asRead(decoded[bestIndex], "yolo", box.score));
     } else {
-      detections.push(yoloBoxToUnread(box));
+      detections.push(yoloBoxToDetection(box, "unread"));
     }
   }
 
@@ -161,6 +164,32 @@ export async function scanImage(
   prepareWasm();
 
   const { canvas, originalSize } = await prepareCanvasFromFile(file);
+
+  if (mode === "locate") {
+    const available = await isYoloAvailable();
+    if (!available) {
+      throw new Error(
+        getYoloLoadError() ||
+          "YOLO model failed to load. Check /models/barcode-yolo11n.onnx.",
+      );
+    }
+
+    const located = await locateBarcodes(canvas);
+    const barcodes = mapCanvasCoordsToOriginal(
+      located.map((box) => yoloBoxToDetection(box, "located")),
+      canvas.width,
+      canvas.height,
+      originalSize.width,
+      originalSize.height,
+    );
+
+    return {
+      barcodes,
+      durationMs: Math.round(performance.now() - start),
+      imageSize: originalSize,
+    };
+  }
+
   const yoloDetections = await scanWithYolo(canvas, mode);
   const barcodes: ScanDetection[] =
     yoloDetections ??

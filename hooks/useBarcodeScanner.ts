@@ -14,6 +14,7 @@ interface UseBarcodeScannerResult {
   error: string | null;
   scan: (file: File, mode?: ScanMode) => Promise<ScanResult | null>;
   scanHarder: (file: File) => Promise<ScanResult | null>;
+  scanLocate: (file: File) => Promise<ScanResult | null>;
   reset: () => void;
   isReady: boolean;
 }
@@ -66,9 +67,13 @@ export function useBarcodeScanner(): UseBarcodeScannerResult {
           ? isReady
             ? "scanning-hard"
             : "loading-wasm"
-          : isReady
-            ? "scanning"
-            : "loading-wasm",
+          : mode === "locate"
+            ? isReady
+              ? "locating"
+              : "loading-wasm"
+            : isReady
+              ? "scanning"
+              : "loading-wasm",
       );
 
       try {
@@ -101,12 +106,18 @@ export function useBarcodeScanner(): UseBarcodeScannerResult {
     [scan],
   );
 
+  const scanLocate = useCallback(
+    (file: File) => scan(file, "locate"),
+    [scan],
+  );
+
   return {
     status,
     results,
     error,
     scan,
     scanHarder,
+    scanLocate,
     reset,
     isReady,
   };

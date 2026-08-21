@@ -38,7 +38,8 @@ function CopyButton({ value }: { value: string }) {
 }
 
 export function BarcodeResults({ barcodes, durationMs }: BarcodeResultsProps) {
-  const read = barcodes.filter((barcode) => barcode.status !== "unread");
+  const located = barcodes.filter((barcode) => barcode.status === "located");
+  const read = barcodes.filter((barcode) => barcode.status === "read");
   const unread = barcodes.filter((barcode) => barcode.status === "unread");
 
   if (barcodes.length === 0) {
@@ -52,6 +53,46 @@ export function BarcodeResults({ barcodes, durationMs }: BarcodeResultsProps) {
           or two labels, better lighting, and the original high-resolution image
           (not a screenshot).
         </p>
+      </div>
+    );
+  }
+
+  if (located.length === barcodes.length) {
+    return (
+      <div className="space-y-4">
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">
+            YOLO located {located.length} barcode
+            {located.length === 1 ? "" : "s"}
+          </h2>
+          {durationMs !== undefined ? (
+            <span className="text-sm text-zinc-500 dark:text-zinc-400">
+              Located in {durationMs}ms
+            </span>
+          ) : null}
+        </div>
+        <p className="text-sm text-zinc-500 dark:text-zinc-400">
+          Blue numbered boxes are YOLO detections only — decode is skipped.
+          Check whether every code in the photo has a box.
+        </p>
+        <ul className="space-y-2">
+          {located.map((barcode, index) => (
+            <li
+              key={`located-${index}`}
+              className="flex items-center justify-between rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm dark:border-zinc-800 dark:bg-zinc-950"
+            >
+              <span className="font-medium text-zinc-900 dark:text-zinc-100">
+                #{index + 1}
+              </span>
+              <span className="text-zinc-500 dark:text-zinc-400">
+                {barcode.score !== undefined
+                  ? `${Math.round(barcode.score * 100)}% conf`
+                  : "located"}
+                {` · ${Math.round(barcode.boundingBox.width)}×${Math.round(barcode.boundingBox.height)}`}
+              </span>
+            </li>
+          ))}
+        </ul>
       </div>
     );
   }

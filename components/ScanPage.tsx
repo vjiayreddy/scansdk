@@ -40,6 +40,14 @@ function StatusBanner({
     );
   }
 
+  if (status === "locating") {
+    return (
+      <div className="rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300">
+        Running YOLO localization only — decode is skipped.
+      </div>
+    );
+  }
+
   if (status === "error" && error) {
     return (
       <div
@@ -55,20 +63,33 @@ function StatusBanner({
 }
 
 export function ScanPage() {
-  const { status, results, error, scan, scanHarder, reset, isReady } =
+  const { status, results, error, scan, scanHarder, scanLocate, reset, isReady } =
     useBarcodeScanner();
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [locateOnly, setLocateOnly] = useState(false);
   const isBusy =
     status === "loading-wasm" ||
     status === "scanning" ||
-    status === "scanning-hard";
+    status === "scanning-hard" ||
+    status === "locating";
+
+  const runScan = useCallback(
+    async (file: File, locate: boolean) => {
+      if (locate) {
+        await scanLocate(file);
+        return;
+      }
+      await scan(file);
+    },
+    [scan, scanLocate],
+  );
 
   const handleFileSelect = useCallback(
     async (file: File) => {
       setSelectedFile(file);
-      await scan(file);
+      await runScan(file, locateOnly);
     },
-    [scan],
+    [locateOnly, runScan],
   );
 
   const handleReset = useCallback(() => {
@@ -89,6 +110,24 @@ export function ScanPage() {
         </p>
       </header>
 
+      <label className="flex cursor-pointer items-center gap-3 rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-3 dark:border-zinc-800 dark:bg-zinc-900">
+        <input
+          type="checkbox"
+          className="h-4 w-4 accent-zinc-900"
+          checked={locateOnly}
+          disabled={isBusy}
+          onChange={(event) => setLocateOnly(event.target.checked)}
+        />
+        <span>
+          <span className="block text-sm font-medium text-zinc-900 dark:text-zinc-100">
+            YOLO locate only
+          </span>
+          <span className="block text-sm text-zinc-500 dark:text-zinc-400">
+            Draw every YOLO box. Skip ZXing decode so you can check recall.
+          </span>
+        </span>
+      </label>
+
       <StatusBanner status={status} error={error} />
 
       {!selectedFile ? (
@@ -103,22 +142,35 @@ export function ScanPage() {
           />
 
           <div className="flex flex-wrap gap-3">
-            <button
-              type="button"
-              onClick={() => scanHarder(selectedFile)}
-              disabled={isBusy || !isReady}
-              className="rounded-full bg-zinc-900 px-5 py-2.5 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
-            >
-              Scan Harder
-            </button>
-            <button
-              type="button"
-              onClick={() => scan(selectedFile)}
-              disabled={isBusy || !isReady}
-              className="rounded-full border border-zinc-300 px-5 py-2.5 text-sm font-medium text-zinc-800 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-900"
-            >
-              Scan Again
-            </button>
+            {locateOnly ? (
+              <button
+                type="button"
+                onClick={() => scanLocate(selectedFile)}
+                disabled={isBusy || !isReady}
+                className="rounded-full bg-zinc-900 px-5 py-2.5 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
+              >
+                Locate again
+              </button>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={() => scanHarder(selectedFile)}
+                  disabled={isBusy || !isReady}
+                  className="rounded-full bg-zinc-900 px-5 py-2.5 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
+                >
+                  Scan Harder
+                </button>
+                <button
+                  type="button"
+                  onClick={() => scan(selectedFile)}
+                  disabled={isBusy || !isReady}
+                  className="rounded-full border border-zinc-300 px-5 py-2.5 text-sm font-medium text-zinc-800 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-900"
+                >
+                  Scan Again
+                </button>
+              </>
+            )}
             <button
               type="button"
               onClick={handleReset}

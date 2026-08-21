@@ -1,6 +1,7 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  transpilePackages: ["onnxruntime-web"],
   headers: async () => [
     {
       source: "/wasm/:path*",
