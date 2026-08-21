@@ -2,26 +2,38 @@
 
 import type { InferenceSession, Tensor } from "onnxruntime-web";
 
-export const YOLO_IMGSZ = 960;
-/**
- * Live letterbox size. Must match the ONNX model's fixed input
- * (barcode-yolo11n.onnx expects 960×960 — dynamic axes not exported).
- */
-export const YOLO_LIVE_IMGSZ = YOLO_IMGSZ;
-export const YOLO_CONF = 0.25;
-export const YOLO_IOU = 0.45;
-export const YOLO_MODEL_URL = "/models/barcode-yolo11n.onnx";
+import {
+  YOLO_IMGSZ,
+  YOLO_LIVE_IMGSZ,
+  YOLO_LIVE_MODEL_URL,
+  YOLO_MODEL_URL,
+  YOLO_WASM_PATHS,
+} from "@/lib/barcode/yolo-config";
+import {
+  parseYoloOutputData,
+  rgbaToChw,
+  type YoloBox,
+} from "@/lib/barcode/yolo-core";
+import {
+  isLiveWorkerReady,
+  locateBarcodesViaWorker,
+  warmLiveYoloWorker,
+} from "@/lib/barcode/yolo-live-worker";
 
-export interface YoloBox {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  score: number;
-}
+export type { YoloBox } from "@/lib/barcode/yolo-core";
+export {
+  YOLO_IMGSZ,
+  YOLO_LIVE_IMGSZ,
+  YOLO_LIVE_MODEL_URL,
+  YOLO_MODEL_URL,
+  YOLO_WASM_PATHS,
+} from "@/lib/barcode/yolo-config";
+export { YOLO_CONF, YOLO_IOU } from "@/lib/barcode/yolo-core";
+
+export type YoloModelKind = "upload" | "live";
 
 export interface LocateBarcodesOptions {
-  /** Ignored — ONNX model is fixed at YOLO_IMGSZ (960). Kept for API stability. */
+  /** Model input size; must match the ONNX graph for that kind. */
   imgsz?: number;
 }
 
@@ -38,7 +50,17 @@ type LetterboxSource =
   | OffscreenCanvas
   | ImageBitmap;
 
-let sessionPromise: Promise<InferenceSession> | null = null;
+interface ModelConfig {
+  url: string;
+  imgsz: number;
+}
+
+const MODEL: Record<YoloModelKind, ModelConfig> = {
+  upload: { url: YOLO_MODEL_URL, imgsz: YOLO_IMGSZ },
+  live: { url: YOLO_LIVE_MODEL_URL, imgsz: YOLO_LIVE_IMGSZ },
+};
+
+const sessionPromises = new Map<YoloModelKind, Promise<InferenceSession>>();
 let lastLoadError = "";
 
 /** Reused across frames to avoid alloc/GC every inference. */
@@ -51,14 +73,17 @@ export function getYoloLoadError(): string {
   return lastLoadError;
 }
 
-async function createSession(): Promise<InferenceSession> {
+async function createSession(kind: YoloModelKind): Promise<InferenceSession> {
   const ort = await import("onnxruntime-web/wasm");
   ort.env.wasm.numThreads = 1;
+  // Live prefers dedicated worker; upload stays on main with proxy off.
   ort.env.wasm.proxy = false;
+  ort.env.wasm.wasmPaths = YOLO_WASM_PATHS;
 
-  const response = await fetch(YOLO_MODEL_URL);
+  const { url } = MODEL[kind];
+  const response = await fetch(url);
   if (!response.ok) {
-    throw new Error(`ONNX fetch failed (${response.status}) for ${YOLO_MODEL_URL}`);
+    throw new Error(`ONNX fetch failed (${response.status}) for ${url}`);
   }
 
   const model = new Uint8Array(await response.arrayBuffer());
@@ -67,22 +92,33 @@ async function createSession(): Promise<InferenceSession> {
   });
 }
 
-async function loadSession(): Promise<InferenceSession> {
-  if (!sessionPromise) {
-    sessionPromise = createSession().catch((error: unknown) => {
-      sessionPromise = null;
+async function loadSession(kind: YoloModelKind): Promise<InferenceSession> {
+  let promise = sessionPromises.get(kind);
+  if (!promise) {
+    promise = createSession(kind).catch((error: unknown) => {
+      sessionPromises.delete(kind);
       lastLoadError =
         error instanceof Error ? error.message : "YOLO session failed to start";
       throw error;
     });
+    sessionPromises.set(kind, promise);
   }
-
-  return sessionPromise;
+  return promise;
 }
 
-export async function isYoloAvailable(): Promise<boolean> {
+export async function isYoloAvailable(
+  kind: YoloModelKind = "upload",
+): Promise<boolean> {
   try {
-    await loadSession();
+    if (kind === "live") {
+      await warmLiveYoloWorker();
+      if (isLiveWorkerReady()) {
+        lastLoadError = "";
+        return true;
+      }
+      // Fall through to main-thread live session.
+    }
+    await loadSession(kind);
     lastLoadError = "";
     return true;
   } catch {
@@ -138,41 +174,9 @@ function letterboxFromSource(source: LetterboxSource, imgsz: number): Letterbox 
   ctx.drawImage(source, padX, padY, newWidth, newHeight);
 
   const { data } = ctx.getImageData(0, 0, imgsz, imgsz);
-  const plane = imgsz * imgsz;
-
-  for (let index = 0; index < plane; index += 1) {
-    const pixel = index * 4;
-    tensor[index] = data[pixel]! / 255;
-    tensor[plane + index] = data[pixel + 1]! / 255;
-    tensor[2 * plane + index] = data[pixel + 2]! / 255;
-  }
+  rgbaToChw(data, imgsz, tensor);
 
   return { tensor, scale, padX, padY };
-}
-
-function boxIou(a: YoloBox, b: YoloBox): number {
-  const ax2 = a.x + a.width;
-  const ay2 = a.y + a.height;
-  const bx2 = b.x + b.width;
-  const by2 = b.y + b.height;
-  const ix = Math.max(0, Math.min(ax2, bx2) - Math.max(a.x, b.x));
-  const iy = Math.max(0, Math.min(ay2, by2) - Math.max(a.y, b.y));
-  const inter = ix * iy;
-  const union = a.width * a.height + b.width * b.height - inter;
-  return union <= 0 ? 0 : inter / union;
-}
-
-function nms(boxes: YoloBox[], iouThresh: number): YoloBox[] {
-  const ordered = [...boxes].sort((a, b) => b.score - a.score);
-  const kept: YoloBox[] = [];
-
-  for (const box of ordered) {
-    if (kept.every((existing) => boxIou(existing, box) < iouThresh)) {
-      kept.push(box);
-    }
-  }
-
-  return kept;
 }
 
 function parseYoloOutput(
@@ -183,81 +187,24 @@ function parseYoloOutput(
   canvasWidth: number,
   canvasHeight: number,
 ): YoloBox[] {
-  const data = output.data as Float32Array;
-  const dims = output.dims;
-  let channels = 5;
-  let count = 0;
-  let channelMajor = true;
-
-  if (dims.length === 3 && dims[1] === 5) {
-    count = dims[2];
-    channelMajor = true;
-  } else if (dims.length === 3 && dims[2] === 5) {
-    count = dims[1];
-    channelMajor = false;
-  } else if (dims.length === 2 && dims[0] === 5) {
-    count = dims[1];
-    channelMajor = true;
-  } else {
-    return [];
-  }
-
-  const boxes: YoloBox[] = [];
-
-  for (let index = 0; index < count; index += 1) {
-    const cx = channelMajor ? data[index] : data[index * channels];
-    const cy = channelMajor ? data[count + index] : data[index * channels + 1];
-    const width = channelMajor
-      ? data[2 * count + index]
-      : data[index * channels + 2];
-    const height = channelMajor
-      ? data[3 * count + index]
-      : data[index * channels + 3];
-    const score = channelMajor
-      ? data[4 * count + index]
-      : data[index * channels + 4];
-
-    if (score === undefined || score < YOLO_CONF) {
-      continue;
-    }
-
-    if (
-      cx === undefined ||
-      cy === undefined ||
-      width === undefined ||
-      height === undefined
-    ) {
-      continue;
-    }
-
-    const x = (cx - width / 2 - padX) / scale;
-    const y = (cy - height / 2 - padY) / scale;
-    const mappedWidth = width / scale;
-    const mappedHeight = height / scale;
-
-    boxes.push({
-      x: Math.max(0, x),
-      y: Math.max(0, y),
-      width: Math.min(mappedWidth, canvasWidth - Math.max(0, x)),
-      height: Math.min(mappedHeight, canvasHeight - Math.max(0, y)),
-      score,
-    });
-  }
-
-  return nms(
-    boxes.filter((box) => box.width >= 2 && box.height >= 2),
-    YOLO_IOU,
+  return parseYoloOutputData(
+    output.data as Float32Array,
+    output.dims,
+    scale,
+    padX,
+    padY,
+    canvasWidth,
+    canvasHeight,
   );
 }
 
 async function runLocate(
   source: LetterboxSource,
-  _imgsz?: number,
+  kind: YoloModelKind,
 ): Promise<YoloBox[]> {
-  // Model graphs are fixed at YOLO_IMGSZ; ignore caller size to avoid OrtRun dim errors.
-  const imgsz = YOLO_IMGSZ;
+  const imgsz = MODEL[kind].imgsz;
   const { width, height } = getSourceSize(source);
-  const session = await loadSession();
+  const session = await loadSession(kind);
   const ort = await import("onnxruntime-web/wasm");
   const { tensor, scale, padX, padY } = letterboxFromSource(source, imgsz);
   const input = new ort.Tensor("float32", tensor, [1, 3, imgsz, imgsz]);
@@ -278,16 +225,32 @@ export async function locateBarcodes(
   source: HTMLCanvasElement,
   options?: LocateBarcodesOptions,
 ): Promise<YoloBox[]> {
-  return runLocate(source, options?.imgsz ?? YOLO_IMGSZ);
+  void options;
+  return runLocate(source, "upload");
 }
 
 /**
- * Locate barcodes directly from a video element (no full-res intermediate canvas).
+ * Locate barcodes directly from a video element.
+ * Prefers the live Web Worker (640); falls back to main-thread 640 session.
  * Boxes are in video intrinsic pixels.
  */
 export async function locateBarcodesFromVideo(
   video: HTMLVideoElement,
   options?: LocateBarcodesOptions,
 ): Promise<YoloBox[]> {
-  return runLocate(video, options?.imgsz ?? YOLO_LIVE_IMGSZ);
+  void options;
+  if (video.readyState < 2 || video.videoWidth < 2) {
+    return [];
+  }
+
+  try {
+    await warmLiveYoloWorker();
+    if (isLiveWorkerReady()) {
+      return await locateBarcodesViaWorker(video);
+    }
+  } catch {
+    // Fall through to main-thread live model.
+  }
+
+  return runLocate(video, "live");
 }

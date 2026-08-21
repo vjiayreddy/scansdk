@@ -30,6 +30,8 @@ import {
 } from "./propose-regions";
 import { proposeBottleLabelRegions, denseMicroGridProposals } from "./propose-bottle-labels";
 import { analyzeScene } from "./scene-analysis";
+import type { ReaderOptions } from "zxing-wasm/reader";
+
 import {
   BINARIZER_PASSES,
   DATAMATRIX_CROP_OPTIONS,
@@ -45,6 +47,7 @@ import {
 
 const CROP_PADDING = 0.45;
 const MIN_CROP_SIDE = 220;
+const LIVE_MAX_CROP_EDGE = 640;
 const MIN_UPSCALE = 3;
 const MIN_UPSCALE_BLUR = 5;
 const MIN_UPSCALE_TINY = 6.5;
@@ -57,6 +60,13 @@ export interface CropScanOptions {
   hardMode?: boolean;
   /** Skip expensive geometry passes — use for wide coverage sweeps. */
   fastOnly?: boolean;
+  /** Override default Data-Matrix-only crop reader (e.g. live multi-format). */
+  readerOptions?: ReaderOptions;
+  /**
+   * Live camera crops: ~12% YOLO expand, no extra 45% pad, capped upscale.
+   * Skips smooth second-pass correction on the first fast attempt.
+   */
+  liveCrop?: boolean;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -67,9 +77,10 @@ function padProposal(
   proposal: RegionProposal,
   canvasWidth: number,
   canvasHeight: number,
+  padRatio = CROP_PADDING,
 ): { x: number; y: number; width: number; height: number } {
-  const padX = Math.round(proposal.width * CROP_PADDING);
-  const padY = Math.round(proposal.height * CROP_PADDING);
+  const padX = Math.round(proposal.width * padRatio);
+  const padY = Math.round(proposal.height * padRatio);
   const x = clamp(proposal.x - padX, 0, canvasWidth - 1);
   const y = clamp(proposal.y - padY, 0, canvasHeight - 1);
   const right = clamp(proposal.x + proposal.width + padX, x + 1, canvasWidth);
@@ -218,8 +229,14 @@ async function decodeImageData(
 async function decodeCropPasses(
   base: ImageData,
   hardMode = false,
+  readerOptions: ReaderOptions = DATAMATRIX_CROP_OPTIONS,
 ): Promise<ReturnType<typeof mapReadResult>[]> {
-  const first = await decodeImageData(base, DATAMATRIX_CROP_OPTIONS, hardMode);
+  const hardOptions: ReaderOptions = {
+    ...readerOptions,
+    tryDenoise: true,
+    tryHarder: true,
+  };
+  const first = await decodeImageData(base, readerOptions, hardMode);
   if (first.length > 0) {
     return first;
   }
@@ -238,8 +255,10 @@ async function decodeCropPasses(
   for (const imageData of fallbacks) {
     const options =
       hardMode && imageData !== base
-        ? DATAMATRIX_HARD_CROP_OPTIONS
-        : DATAMATRIX_CROP_OPTIONS;
+        ? readerOptions === DATAMATRIX_CROP_OPTIONS
+          ? DATAMATRIX_HARD_CROP_OPTIONS
+          : hardOptions
+        : readerOptions;
     const valid = await decodeImageData(imageData, options, hardMode);
     if (valid.length > 0) {
       return valid;
@@ -250,7 +269,9 @@ async function decodeCropPasses(
     for (const imageData of applyThresholdVariants(base)) {
       const valid = await decodeImageData(
         imageData,
-        DATAMATRIX_HARD_CROP_OPTIONS,
+        readerOptions === DATAMATRIX_CROP_OPTIONS
+          ? DATAMATRIX_HARD_CROP_OPTIONS
+          : hardOptions,
         true,
       );
       if (valid.length > 0) {
@@ -515,11 +536,18 @@ function upscaleRegion(
   region: { x: number; y: number; width: number; height: number },
   minUpscale = MIN_UPSCALE,
   smooth = false,
+  maxEdge = 0,
 ): { canvas: HTMLCanvasElement; scale: number } {
-  const scale = Math.max(
+  let scale = Math.max(
     minUpscale,
     MIN_CROP_SIDE / Math.min(region.width, region.height),
   );
+  if (maxEdge > 0) {
+    const longest = Math.max(region.width, region.height) * scale;
+    if (longest > maxEdge) {
+      scale = maxEdge / Math.max(region.width, region.height);
+    }
+  }
   const canvas = document.createElement("canvas");
   canvas.width = Math.round(region.width * scale);
   canvas.height = Math.round(region.height * scale);
@@ -528,8 +556,8 @@ function upscaleRegion(
     throw new Error("Canvas context unavailable");
   }
 
-  ctx.imageSmoothingEnabled = smooth;
-  if (smooth) {
+  ctx.imageSmoothingEnabled = smooth || scale < 1;
+  if (smooth || scale < 1) {
     ctx.imageSmoothingQuality = "high";
   }
   ctx.drawImage(
@@ -621,13 +649,20 @@ async function decodeProposal(
 
   const hardMode = options.hardMode === true;
   const fastOnly = options.fastOnly === true;
+  const liveCrop = options.liveCrop === true;
+  const readerOpts = options.readerOptions ?? DATAMATRIX_CROP_OPTIONS;
   const scene = analyzeScene(
     canvas.width,
     canvas.height,
     knownHits,
     hardMode,
   );
-  const region = padProposal(proposal, canvas.width, canvas.height);
+  const region = padProposal(
+    proposal,
+    canvas.width,
+    canvas.height,
+    liveCrop ? 0 : CROP_PADDING,
+  );
   const previewCtx = canvas.getContext("2d", { willReadFrequently: true });
   if (!previewCtx) {
     return [];
@@ -637,22 +672,34 @@ async function decodeProposal(
   const blurry = isBlurry(preview);
   const useHardPasses = !fastOnly && (hardMode || scene.aggressive || blurry);
   const tinyProposal = proposal.width <= TINY_PROPOSAL_SIDE;
-  const minUpscale = fastOnly
-    ? Math.max(MIN_UPSCALE, MIN_CROP_SIDE / Math.min(region.width, region.height))
-    : tinyProposal
-      ? MIN_UPSCALE_TINY
-      : useHardPasses
-        ? MIN_UPSCALE_BLUR
-        : MIN_UPSCALE;
+  const minUpscale = liveCrop
+    ? 1
+    : fastOnly
+      ? Math.max(MIN_UPSCALE, MIN_CROP_SIDE / Math.min(region.width, region.height))
+      : tinyProposal
+        ? MIN_UPSCALE_TINY
+        : useHardPasses
+          ? MIN_UPSCALE_BLUR
+          : MIN_UPSCALE;
 
-  const { canvas: cropCanvas, scale } = upscaleRegion(canvas, region, minUpscale);
+  const { canvas: cropCanvas, scale } = upscaleRegion(
+    canvas,
+    region,
+    minUpscale,
+    false,
+    liveCrop ? LIVE_MAX_CROP_EDGE : 0,
+  );
   const cropCtx = cropCanvas.getContext("2d", { willReadFrequently: true });
   if (!cropCtx) {
     return [];
   }
 
   const cropData = cropCtx.getImageData(0, 0, cropCanvas.width, cropCanvas.height);
-  let decoded = await decodeCropPasses(cropData, useHardPasses && !fastOnly);
+  let decoded = await decodeCropPasses(
+    cropData,
+    useHardPasses && !fastOnly,
+    readerOpts,
+  );
   if (decoded.length > 0) {
     return mappedHits(
       decoded,
@@ -665,7 +712,8 @@ async function decodeProposal(
   }
 
   // Soft JPEG packs often need bilinear upscale instead of nearest-neighbor.
-  if (remainingMs(deadline) > 60) {
+  // Live first pass skips this — escalate only via reader options.
+  if (!liveCrop && remainingMs(deadline) > 60) {
     const { canvas: smoothCanvas, scale: smoothScale } = upscaleRegion(
       canvas,
       region,
@@ -680,7 +728,11 @@ async function decodeProposal(
         smoothCanvas.width,
         smoothCanvas.height,
       );
-      decoded = await decodeCropPasses(smoothData, useHardPasses && !fastOnly);
+      decoded = await decodeCropPasses(
+        smoothData,
+        useHardPasses && !fastOnly,
+        readerOpts,
+      );
       if (decoded.length > 0) {
         return mappedHits(
           decoded,
@@ -695,8 +747,12 @@ async function decodeProposal(
   }
 
   if (fastOnly) {
-    if (remainingMs(deadline) > 80) {
-      decoded = await decodeCropPasses(applyCorrectionChain(cropData), false);
+    if (!liveCrop && remainingMs(deadline) > 80) {
+      decoded = await decodeCropPasses(
+        applyCorrectionChain(cropData),
+        false,
+        readerOpts,
+      );
       if (decoded.length > 0) {
         return mappedHits(
           decoded,
@@ -720,7 +776,7 @@ async function decodeProposal(
     const largeCtx = largeCanvas.getContext("2d", { willReadFrequently: true });
     if (largeCtx) {
       const largeData = largeCtx.getImageData(0, 0, largeCanvas.width, largeCanvas.height);
-      decoded = await decodeCropPasses(largeData, true);
+      decoded = await decodeCropPasses(largeData, true, readerOpts);
       if (decoded.length > 0) {
         return mappedHits(
           decoded,
@@ -745,7 +801,7 @@ async function decodeProposal(
     const rotatedCtx = rotated.getContext("2d", { willReadFrequently: true });
     if (rotatedCtx) {
       const rotatedData = rotatedCtx.getImageData(0, 0, rotated.width, rotated.height);
-      decoded = await decodeCropPasses(rotatedData, useHardPasses);
+      decoded = await decodeCropPasses(rotatedData, useHardPasses, readerOpts);
       if (decoded.length > 0) {
         return mappedHits(
           decoded,
@@ -1075,7 +1131,14 @@ export async function scanLocatedRegions(
   options: CropScanOptions = {},
 ): Promise<DetectedBarcode[]> {
   const proposals: RegionProposal[] = regions
-    .map((region) => expandYoloRegion(region, canvas.width, canvas.height))
+    .map((region) =>
+      expandYoloRegion(
+        region,
+        canvas.width,
+        canvas.height,
+        options.liveCrop === true,
+      ),
+    )
     .map((region) => ({
       x: Math.round(region.x),
       y: Math.round(region.y),
@@ -1132,9 +1195,11 @@ function expandYoloRegion(
   region: { x: number; y: number; width: number; height: number; score?: number },
   canvasWidth: number,
   canvasHeight: number,
+  liveCrop = false,
 ): { x: number; y: number; width: number; height: number; score?: number } {
-  const padX = Math.max(6, Math.round(region.width * 0.22));
-  const padY = Math.max(6, Math.round(region.height * 0.22));
+  const ratio = liveCrop ? 0.12 : 0.22;
+  const padX = Math.max(liveCrop ? 4 : 6, Math.round(region.width * ratio));
+  const padY = Math.max(liveCrop ? 4 : 6, Math.round(region.height * ratio));
   const x = clamp(region.x - padX, 0, canvasWidth - 1);
   const y = clamp(region.y - padY, 0, canvasHeight - 1);
   const right = clamp(region.x + region.width + padX, x + 1, canvasWidth);

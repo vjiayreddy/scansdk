@@ -33,6 +33,33 @@ export const DATAMATRIX_CROP_OPTIONS: ReaderOptions = {
   binarizer: "LocalAverage",
 };
 
+/** Live camera crops — multi-format escalate pass after fast Data Matrix miss. */
+export const LIVE_CROP_OPTIONS: ReaderOptions = {
+  tryHarder: true,
+  tryDenoise: true,
+  tryRotate: true,
+  tryInvert: true,
+  tryDownscale: true,
+  maxNumberOfSymbols: 4,
+  formats: ["DataMatrix", "QRCode", "EAN13", "EAN8", "Code128", "UPCA", "UPCE"],
+  binarizer: "LocalAverage",
+};
+
+/**
+ * Live first pass — Data Matrix only, light flags (pharma primary).
+ * Escalate to LIVE_CROP_OPTIONS only if budget remains.
+ */
+export const LIVE_FAST_CROP_OPTIONS: ReaderOptions = {
+  tryHarder: false,
+  tryDenoise: false,
+  tryRotate: true,
+  tryInvert: true,
+  tryDownscale: true,
+  maxNumberOfSymbols: 2,
+  formats: ["DataMatrix"],
+  binarizer: "LocalAverage",
+};
+
 /** Blurry crops only — WASM denoise complements JS deblur filters. */
 export const DATAMATRIX_HARD_CROP_OPTIONS: ReaderOptions = {
   tryHarder: true,

@@ -14,6 +14,7 @@ type ResultsBottomSheetProps = {
   barcodes: ScanDetection[];
   durationMs?: number;
   file?: File | null;
+  media?: HTMLCanvasElement | HTMLVideoElement | HTMLImageElement | null;
   imageSize?: ImageSize;
   title?: string;
   subtitle?: string;
@@ -25,6 +26,7 @@ export function ResultsBottomSheet({
   barcodes,
   durationMs,
   file = null,
+  media = null,
   imageSize,
   title = "Detected barcodes",
   subtitle,
@@ -113,6 +115,7 @@ export function ResultsBottomSheet({
             barcodes={barcodes}
             durationMs={durationMs}
             file={file}
+            media={media}
             imageSize={imageSize}
             compact
           />
