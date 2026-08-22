@@ -80,8 +80,10 @@ const STABLE_DELTA_RATIO = 0.35;
 const DECODE_COOLDOWN_MS = 80;
 const UNREAD_RETRY_MS = 600;
 const DECODE_POLL_MS = 100;
-/** Continuous native BarcodeDetector.detect(video) interval. */
+/** Full-frame native poll when YOLO is empty or still stabilizing. */
 const NATIVE_VIDEO_POLL_MS = 120;
+/** Slower full-frame poll when YOLO already read all stable tracks. */
+const NATIVE_VIDEO_POLL_SLOW_MS = 450;
 /** Paint red only after this many consecutive misses. */
 const FAILS_BEFORE_UNREAD = 5;
 const MAX_CROPS_PER_BURST = 2;
@@ -97,6 +99,62 @@ function ensureCropCanvas(): HTMLCanvasElement {
     cropCanvas = document.createElement("canvas");
   }
   return cropCanvas;
+}
+
+/**
+ * Skip continuous native detect(video) while YOLO has stable unread tracks —
+ * crop + ZXing path is cheaper and avoids duplicate full-frame work.
+ */
+function shouldSkipNativeVideoPoll(
+  boxes: LiveYoloBox[],
+  trackMeta: LiveTrackMeta[],
+  statusById: Map<number, TrackStatus>,
+): boolean {
+  if (boxes.length === 0) {
+    return false;
+  }
+  const metaById = new Map(trackMeta.map((m) => [m.id, m]));
+  for (const box of boxes) {
+    const meta = metaById.get(box.id);
+    if (!meta || !isStable(meta)) {
+      continue;
+    }
+    const trackStatus = statusById.get(box.id);
+    if (trackStatus?.status !== "read") {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Interval for full-frame native poll based on YOLO track state. */
+function nativeVideoPollIntervalMs(
+  boxes: LiveYoloBox[],
+  trackMeta: LiveTrackMeta[],
+  statusById: Map<number, TrackStatus>,
+): number {
+  if (shouldSkipNativeVideoPoll(boxes, trackMeta, statusById)) {
+    return 0;
+  }
+  if (boxes.length === 0) {
+    return NATIVE_VIDEO_POLL_MS;
+  }
+  const metaById = new Map(trackMeta.map((m) => [m.id, m]));
+  const hasStable = boxes.some((box) => {
+    const meta = metaById.get(box.id);
+    return meta !== undefined && isStable(meta);
+  });
+  if (!hasStable) {
+    return NATIVE_VIDEO_POLL_MS;
+  }
+  const allStableRead = boxes.every((box) => {
+    const meta = metaById.get(box.id);
+    if (!meta || !isStable(meta)) {
+      return true;
+    }
+    return statusById.get(box.id)?.status === "read";
+  });
+  return allStableRead ? NATIVE_VIDEO_POLL_SLOW_MS : NATIVE_VIDEO_POLL_MS;
 }
 
 function isStable(meta: LiveTrackMeta): boolean {
@@ -423,6 +481,14 @@ export function useLiveRoiDecode({
       if (cancelled || nativeBusyRef.current || isLiveDecodeBusy()) {
         return;
       }
+      const pollMs = nativeVideoPollIntervalMs(
+        boxesRef.current,
+        trackMetaRef.current,
+        statusRef.current,
+      );
+      if (pollMs === 0) {
+        return;
+      }
       const video = videoRefInternal.current.current;
       if (!video || video.readyState < 2 || video.videoWidth < 2) {
         return;
@@ -432,48 +498,6 @@ export function useLiveRoiDecode({
       void (async () => {
         try {
           const hits = await detectNativeBarcodes(video);
-          // #region agent log
-          if (hits.length > 0 || Math.random() < 0.08) {
-            let supported: string[] | null = null;
-            try {
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              const Det = (window as any).BarcodeDetector;
-              if (Det?.getSupportedFormats) {
-                supported = await Det.getSupportedFormats();
-              }
-            } catch {
-              supported = null;
-            }
-            fetch(
-              "http://127.0.0.1:7835/ingest/0fbe70ba-5541-45af-9767-b65e9e5e5e90",
-              {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json",
-                  "X-Debug-Session-Id": "45ff5c",
-                },
-                body: JSON.stringify({
-                  sessionId: "45ff5c",
-                  runId: "post-fix-5",
-                  hypothesisId: "H8_H15",
-                  location: "useLiveRoiDecode.ts:nativeVideo",
-                  message: "native_video_poll",
-                  data: {
-                    hitCount: hits.length,
-                    values: hits.slice(0, 3).map((h) => ({
-                      v: h.rawValue.slice(0, 20),
-                      f: h.format,
-                    })),
-                    avail: isNativeBarcodeDetectorAvailable(),
-                    supported: supported?.slice(0, 20) ?? null,
-                    hasDataMatrix: supported?.includes("data_matrix") ?? null,
-                  },
-                  timestamp: Date.now(),
-                }),
-              },
-            ).catch(() => {});
-          }
-          // #endregion
           if (!cancelled && hits.length > 0) {
             ingestNativeHitsRef.current(hits);
           }
@@ -517,39 +541,12 @@ export function useLiveRoiDecode({
       const useRoi = roiEnabledRef.current;
       const metaById = new Map(currentMeta.map((m) => [m.id, m]));
 
-      const unstableReasons: {
-        id: number;
-        hits: number;
-        miss: number;
-        delta: number;
-        reason: string;
-      }[] = [];
       const candidates = currentBoxes.filter((box) => {
         const meta = metaById.get(box.id);
         if (!meta || !isStable(meta)) {
-          unstableReasons.push({
-            id: box.id,
-            hits: meta?.hits ?? -1,
-            miss: meta?.miss ?? -1,
-            delta: Math.round(meta?.lastDelta ?? -1),
-            reason: !meta
-              ? "no_meta"
-              : meta.miss > 0
-                ? "miss"
-                : meta.hits < STABLE_HITS
-                  ? "hits"
-                  : "delta",
-          });
           return false;
         }
         if (useRoi && currentRoi && !boxIntersectsRoi(box, currentRoi)) {
-          unstableReasons.push({
-            id: box.id,
-            hits: meta.hits,
-            miss: meta.miss,
-            delta: Math.round(meta.lastDelta),
-            reason: "roi",
-          });
           return false;
         }
         const existing = statusRef.current.get(box.id);
@@ -582,40 +579,6 @@ export function useLiveRoiDecode({
         }
         return true;
       });
-
-      // #region agent log
-      if (currentBoxes.length > 0 && Math.random() < 0.25) {
-        fetch(
-          "http://127.0.0.1:7835/ingest/0fbe70ba-5541-45af-9767-b65e9e5e5e90",
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "X-Debug-Session-Id": "45ff5c",
-            },
-            body: JSON.stringify({
-              sessionId: "45ff5c",
-              runId: "post-fix-5",
-              hypothesisId: "H3",
-              location: "useLiveRoiDecode.ts:candidates",
-              message: "decode_candidate_gate",
-              data: {
-                boxes: currentBoxes.length,
-                candidates: candidates.length,
-                roi: useRoi,
-                unstable: unstableReasons.slice(0, 8),
-                statuses: [...statusRef.current.entries()].map(([id, s]) => ({
-                  id,
-                  status: s.status,
-                  fails: s.failCount,
-                })),
-              },
-              timestamp: Date.now(),
-            }),
-          },
-        ).catch(() => {});
-      }
-      // #endregion
 
       if (candidates.length === 0) {
         return;
@@ -655,123 +618,23 @@ export function useLiveRoiDecode({
               video.videoWidth,
               video.videoHeight,
             );
-            const {
-              scale,
-              width: cropW,
-              height: cropH,
-              contentEdge,
-            } = drawLiveCrop(video, crop, canvas, {
+            const { scale } = drawLiveCrop(video, crop, canvas, {
               contentWidth: box.width,
               contentHeight: box.height,
             });
-            // #region agent log
-            let cropStats: {
-              mean: number;
-              std: number;
-              min: number;
-              max: number;
-            } | null = null;
-            try {
-              const ctx = canvas.getContext("2d", { willReadFrequently: true });
-              if (ctx) {
-                const { data } = ctx.getImageData(0, 0, cropW, cropH);
-                let sum = 0;
-                let sumSq = 0;
-                let min = 255;
-                let max = 0;
-                const step = Math.max(1, Math.floor(data.length / 4 / 400));
-                let n = 0;
-                for (let i = 0; i < data.length; i += 4 * step) {
-                  const y =
-                    0.299 * data[i]! +
-                    0.587 * data[i + 1]! +
-                    0.114 * data[i + 2]!;
-                  sum += y;
-                  sumSq += y * y;
-                  if (y < min) min = y;
-                  if (y > max) max = y;
-                  n += 1;
-                }
-                const mean = n ? sum / n : 0;
-                cropStats = {
-                  mean: Math.round(mean),
-                  std: Math.round(
-                    n ? Math.sqrt(Math.max(0, sumSq / n - mean * mean)) : 0,
-                  ),
-                  min: Math.round(min),
-                  max: Math.round(max),
-                };
-              }
-            } catch {
-              cropStats = null;
-            }
-            // #endregion
             const bitmap = await createImageBitmap(canvas);
 
-            const priorFails = nextStatus.get(box.id)?.failCount ?? 0;
             // Live FPS is low — always use the harder multi-format path.
             const escalate = true;
 
             let hits: Awaited<ReturnType<typeof decodeCropBitmap>> = [];
-            let decodeError: string | null = null;
             try {
               hits = await decodeCropBitmap(bitmap, escalate);
-            } catch (err: unknown) {
+            } catch {
               hits = [];
-              decodeError =
-                err instanceof Error ? err.message : "decode threw";
             }
 
             const best = hits[0] ?? null;
-            // #region agent log
-            fetch(
-              "http://127.0.0.1:7835/ingest/0fbe70ba-5541-45af-9767-b65e9e5e5e90",
-              {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json",
-                  "X-Debug-Session-Id": "45ff5c",
-                },
-                body: JSON.stringify({
-                  sessionId: "45ff5c",
-                  runId: "post-fix-5",
-                  hypothesisId: "H16",
-                  location: "useLiveRoiDecode.ts:decode",
-                  message: best?.rawValue ? "decode_success" : "decode_miss",
-                  data: {
-                    trackId: box.id,
-                    hitCount: hits.length,
-                    value: best?.rawValue?.slice(0, 24) ?? null,
-                    format: best?.format ?? null,
-                    escalate,
-                    priorFails,
-                    crop: {
-                      x: Math.round(crop.x),
-                      y: Math.round(crop.y),
-                      w: Math.round(crop.width),
-                      h: Math.round(crop.height),
-                    },
-                    canvas: {
-                      w: cropW,
-                      h: cropH,
-                      scale: Math.round(scale * 100) / 100,
-                      contentEdge,
-                    },
-                    cropStats,
-                    boxScore: Math.round(box.score * 100) / 100,
-                    boxRaw: {
-                      w: Math.round(box.width),
-                      h: Math.round(box.height),
-                    },
-                    video: { w: video.videoWidth, h: video.videoHeight },
-                    nativeAvail: isNativeBarcodeDetectorAvailable(),
-                    decodeError,
-                  },
-                  timestamp: Date.now(),
-                }),
-              },
-            ).catch(() => {});
-            // #endregion
             if (best?.rawValue) {
               const value = best.rawValue.trim();
               const videoBox = mapCropBBoxToVideo(
