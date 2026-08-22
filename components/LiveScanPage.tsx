@@ -121,6 +121,8 @@ export function LiveScanPage() {
     inferenceMs,
     status: locateStatus,
     error: locateError,
+    executionProvider,
+    locateProfile,
     clearBoxes,
   } = useLiveYoloLocate({
     videoRef,
@@ -447,6 +449,8 @@ export function LiveScanPage() {
               { label: "Locate FPS", value: fps },
               { label: "Inference ms", value: inferenceMs },
               { label: "Boxes", value: boxCount },
+              { label: "Profile", value: locateProfile },
+              { label: "EP", value: executionProvider ?? "—" },
               {
                 label: "ROI",
                 value: roiEnabled ? (roiEditing ? "editing" : "on") : "off",

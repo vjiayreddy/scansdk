@@ -37,7 +37,7 @@ type LocateMsg = {
 type InMsg = InitMsg | LocateMsg;
 
 type OutMsg =
-  | { type: "ready" }
+  | { type: "ready"; executionProvider?: string }
   | { type: "result"; id: number; boxes: YoloBox[]; inferenceMs: number }
   | { type: "error"; id?: number; message: string };
 
@@ -117,10 +117,12 @@ async function handleInit(msg: InitMsg): Promise<void> {
     session = await ortMod.InferenceSession.create(model, {
       executionProviders: preferGpu ? ["webgpu", "wasm"] : ["wasm"],
     });
+    post({ type: "ready", executionProvider: preferGpu ? "webgpu" : "wasm" });
   } catch {
     session = await ortMod.InferenceSession.create(model, {
       executionProviders: ["wasm"],
     });
+    post({ type: "ready", executionProvider: "wasm" });
   }
 }
 
@@ -191,7 +193,6 @@ self.onmessage = (event: MessageEvent<InMsg>) => {
     try {
       if (data.type === "init") {
         await handleInit(data);
-        post({ type: "ready" });
         return;
       }
       if (data.type === "locate") {

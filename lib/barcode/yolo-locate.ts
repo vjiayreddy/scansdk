@@ -18,6 +18,7 @@ import {
   type YoloBox,
 } from "@/lib/barcode/yolo-core";
 import {
+  getLiveWorkerExecutionProvider,
   isLiveWorkerReady,
   locateBarcodesViaWorker,
   warmLiveYoloWorker,
@@ -67,6 +68,7 @@ const MODEL: Record<YoloModelKind, ModelConfig> = {
 };
 
 const sessionPromises = new Map<YoloModelKind, Promise<InferenceSession>>();
+const sessionExecutionProviders = new Map<YoloModelKind, string>();
 let lastLoadError = "";
 
 /** Reused across frames to avoid alloc/GC every inference. */
@@ -77,6 +79,21 @@ let pooledImgsz = 0;
 
 export function getYoloLoadError(): string {
   return lastLoadError;
+}
+
+/** Active EP for a loaded main-thread session (worker reports separately). */
+export function getYoloSessionExecutionProvider(
+  kind: YoloModelKind,
+): string | null {
+  return sessionExecutionProviders.get(kind) ?? null;
+}
+
+/** Best-known EP for the live locate path (worker preferred). */
+export function getLiveLocateExecutionProvider(): string {
+  if (isLiveWorkerReady()) {
+    return getLiveWorkerExecutionProvider();
+  }
+  return sessionExecutionProviders.get("live") ?? "wasm";
 }
 
 async function createSession(kind: YoloModelKind): Promise<InferenceSession> {
@@ -93,19 +110,24 @@ async function createSession(kind: YoloModelKind): Promise<InferenceSession> {
   }
 
   const model = new Uint8Array(await response.arrayBuffer());
-  const providers =
-    kind === "live" && typeof navigator !== "undefined" && "gpu" in navigator
-      ? (["webgpu", "wasm"] as const)
-      : (["wasm"] as const);
+  const preferGpu =
+    kind === "live" && typeof navigator !== "undefined" && "gpu" in navigator;
+  const providers = preferGpu
+    ? (["webgpu", "wasm"] as const)
+    : (["wasm"] as const);
 
   try {
-    return await ort.InferenceSession.create(model, {
+    const session = await ort.InferenceSession.create(model, {
       executionProviders: [...providers],
     });
+    sessionExecutionProviders.set(kind, preferGpu ? "webgpu" : "wasm");
+    return session;
   } catch {
-    return ort.InferenceSession.create(model, {
+    const session = await ort.InferenceSession.create(model, {
       executionProviders: ["wasm"],
     });
+    sessionExecutionProviders.set(kind, "wasm");
+    return session;
   }
 }
 
@@ -228,6 +250,7 @@ function liveBoxRank(box: YoloBox): number {
 async function runLocate(
   source: LetterboxSource,
   kind: YoloModelKind,
+  useLiveThresholds = kind === "live",
 ): Promise<YoloBox[]> {
   const imgsz = MODEL[kind].imgsz;
   const { width, height } = getSourceSize(source);
@@ -251,11 +274,11 @@ async function runLocate(
     padY,
     width,
     height,
-    kind === "live" ? YOLO_LIVE_CONF : undefined,
-    kind === "live" ? YOLO_LIVE_IOU : undefined,
+    useLiveThresholds ? YOLO_LIVE_CONF : undefined,
+    useLiveThresholds ? YOLO_LIVE_IOU : undefined,
   );
 
-  if (kind === "live") {
+  if (useLiveThresholds) {
     return boxes
       .slice()
       .sort((a, b) => liveBoxRank(b) - liveBoxRank(a))
@@ -274,6 +297,11 @@ export async function locateBarcodes(
   return runLocate(source, "upload");
 }
 
+export interface LocateBarcodesFromVideoOptions {
+  /** Run the 960 upload model on main thread (slow; for tiny-code fallback). */
+  hd?: boolean;
+}
+
 /**
  * Locate barcodes directly from a video element.
  * Prefers the live Web Worker (640); falls back to main-thread live session.
@@ -281,9 +309,12 @@ export async function locateBarcodes(
  */
 export async function locateBarcodesFromVideo(
   video: HTMLVideoElement,
-  options?: LocateBarcodesOptions,
+  options?: LocateBarcodesFromVideoOptions,
 ): Promise<YoloBox[]> {
-  void options;
+  if (options?.hd) {
+    return locateBarcodesFromVideoHd(video);
+  }
+
   if (video.readyState < 2 || video.videoWidth < 2) {
     return [];
   }
@@ -298,4 +329,17 @@ export async function locateBarcodesFromVideo(
   }
 
   return runLocate(video, "live");
+}
+
+/**
+ * High-resolution locate pass (960) for tiny / distant codes when 640 finds nothing.
+ * Always runs on the main thread — too heavy to keep loaded in the live worker.
+ */
+export async function locateBarcodesFromVideoHd(
+  video: HTMLVideoElement,
+): Promise<YoloBox[]> {
+  if (video.readyState < 2 || video.videoWidth < 2) {
+    return [];
+  }
+  return runLocate(video, "upload", true);
 }

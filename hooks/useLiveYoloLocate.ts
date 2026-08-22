@@ -4,10 +4,14 @@ import { useCallback, useEffect, useRef, useState, type RefObject } from "react"
 
 import { boxIou, type YoloBox } from "@/lib/barcode/yolo-core";
 import {
+  getLiveLocateExecutionProvider,
   getYoloLoadError,
+  getYoloSessionExecutionProvider,
   isYoloAvailable,
   locateBarcodesFromVideo,
 } from "@/lib/barcode/yolo-locate";
+
+export type LiveLocateProfile = "640" | "960";
 
 export type LiveLocateStatus =
   | "idle"
@@ -33,6 +37,10 @@ interface UseLiveYoloLocateResult {
   inferenceMs: number;
   status: LiveLocateStatus;
   error: string | null;
+  /** ORT execution provider for the active locate path. */
+  executionProvider: string | null;
+  /** Model input profile used on the last completed infer. */
+  locateProfile: LiveLocateProfile;
   clearBoxes: () => void;
 }
 
@@ -80,6 +88,16 @@ const JUMP_RESET_FACTOR = 0.75;
  * small floor so we do not queue back-to-back OrtRuns on weak phones.
  */
 const MIN_INFER_GAP_MS = 40;
+/** Consecutive empty locate cycles before a one-shot 960 pass. */
+const EMPTY_CYCLES_FOR_HD = 2;
+/** Minimum gap between 960 fallback passes (ms). */
+const HD_COOLDOWN_MS = 2500;
+/** When boxes are stable, run YOLO every N locate slots instead of every slot. */
+const STABLE_LOCATE_INTERVAL = 3;
+
+function hasVisibleTracks(tracks: TrackedBox[]): boolean {
+  return toPublicBoxes(tracks).length > 0;
+}
 
 function centerOf(box: { x: number; y: number; width: number; height: number }): {
   cx: number;
@@ -281,6 +299,10 @@ export function useLiveYoloLocate({
   const [inferenceMs, setInferenceMs] = useState(0);
   const [status, setStatus] = useState<LiveLocateStatus>("idle");
   const [error, setError] = useState<string | null>(null);
+  const [executionProvider, setExecutionProvider] = useState<string | null>(
+    null,
+  );
+  const [locateProfile, setLocateProfile] = useState<LiveLocateProfile>("640");
 
   const busyRef = useRef(false);
   const frameTimesRef = useRef<number[]>([]);
@@ -291,6 +313,9 @@ export function useLiveYoloLocate({
   const runGenerationRef = useRef(0);
   const requestIdRef = useRef(0);
   const lastInferAtRef = useRef(0);
+  const emptyLocateCyclesRef = useRef(0);
+  const hdCooldownUntilRef = useRef(0);
+  const stableLocateSlotRef = useRef(0);
 
   useEffect(() => {
     enabledRef.current = enabled;
@@ -314,10 +339,14 @@ export function useLiveYoloLocate({
   const clearBoxes = useCallback(() => {
     runGenerationRef.current += 1;
     tracksRef.current = [];
+    emptyLocateCyclesRef.current = 0;
+    hdCooldownUntilRef.current = 0;
+    stableLocateSlotRef.current = 0;
     setBoxes([]);
     setTrackMeta([]);
     setFps(0);
     setInferenceMs(0);
+    setLocateProfile("640");
   }, []);
 
   useEffect(() => {
@@ -361,6 +390,7 @@ export function useLiveYoloLocate({
 
         setStatus("running");
         lastInferAtRef.current = performance.now();
+        setExecutionProvider(getLiveLocateExecutionProvider());
 
         const tick = () => {
           if (cancelled || generation !== runGenerationRef.current) {
@@ -380,10 +410,23 @@ export function useLiveYoloLocate({
             return;
           }
 
+          if (hasVisibleTracks(tracksRef.current)) {
+            stableLocateSlotRef.current += 1;
+            if (stableLocateSlotRef.current % STABLE_LOCATE_INTERVAL !== 0) {
+              return;
+            }
+          } else {
+            stableLocateSlotRef.current = 0;
+          }
+
           const video = videoRef.current;
           if (!video || video.readyState < 2 || video.videoWidth < 2) {
             return;
           }
+
+          const useHd =
+            emptyLocateCyclesRef.current >= EMPTY_CYCLES_FOR_HD &&
+            now >= hdCooldownUntilRef.current;
 
           busyRef.current = true;
           const requestId = ++requestIdRef.current;
@@ -394,7 +437,9 @@ export function useLiveYoloLocate({
           void (async () => {
             try {
               const started = performance.now();
-              const detections = await locateBarcodesFromVideo(video);
+              const detections = await locateBarcodesFromVideo(video, {
+                hd: useHd,
+              });
               const elapsed = performance.now() - started;
 
               if (
@@ -427,6 +472,25 @@ export function useLiveYoloLocate({
               publishMeta(tracksRef.current);
               setInferenceMs(Math.round(elapsed));
               setFps(times.length);
+
+              const visibleCount = toPublicBoxes(tracksRef.current).length;
+              if (visibleCount === 0) {
+                emptyLocateCyclesRef.current += 1;
+              } else {
+                emptyLocateCyclesRef.current = 0;
+              }
+
+              if (useHd) {
+                hdCooldownUntilRef.current =
+                  performance.now() + HD_COOLDOWN_MS;
+                setLocateProfile("960");
+                setExecutionProvider(
+                  getYoloSessionExecutionProvider("upload") ?? "wasm",
+                );
+              } else {
+                setLocateProfile("640");
+                setExecutionProvider(getLiveLocateExecutionProvider());
+              }
             } catch (err: unknown) {
               if (
                 cancelled ||
@@ -464,5 +528,15 @@ export function useLiveYoloLocate({
     };
   }, [enabled, videoRef]);
 
-  return { boxes, trackMeta, fps, inferenceMs, status, error, clearBoxes };
+  return {
+    boxes,
+    trackMeta,
+    fps,
+    inferenceMs,
+    status,
+    error,
+    executionProvider,
+    locateProfile,
+    clearBoxes,
+  };
 }

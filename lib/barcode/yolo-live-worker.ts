@@ -10,7 +10,7 @@ import {
 } from "@/lib/barcode/yolo-config";
 import type { YoloBox } from "@/lib/barcode/yolo-core";
 
-type WorkerReady = { type: "ready" };
+type WorkerReady = { type: "ready"; executionProvider?: string };
 type WorkerResult = {
   type: "result";
   id: number;
@@ -28,6 +28,7 @@ type Pending = {
 let worker: Worker | null = null;
 let readyPromise: Promise<boolean> | null = null;
 let ready = false;
+let workerExecutionProvider = "wasm";
 let nextId = 1;
 const pending = new Map<number, Pending>();
 
@@ -42,6 +43,9 @@ function handleMessage(event: MessageEvent<WorkerOut>): void {
   const data = event.data;
   if (data.type === "ready") {
     ready = true;
+    if (data.executionProvider) {
+      workerExecutionProvider = data.executionProvider;
+    }
     return;
   }
   if (data.type === "error") {
@@ -148,6 +152,10 @@ export async function warmLiveYoloWorker(): Promise<boolean> {
 
 export function isLiveWorkerReady(): boolean {
   return ready && worker !== null;
+}
+
+export function getLiveWorkerExecutionProvider(): string {
+  return workerExecutionProvider;
 }
 
 /**
