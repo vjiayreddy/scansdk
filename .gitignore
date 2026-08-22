@@ -27,6 +27,8 @@
 
 # cursor / local IDE
 .cursor/
+AGENTS.md
+CLAUDE.md
 
 # onnxruntime / local tooling artifacts
 :memory:*
