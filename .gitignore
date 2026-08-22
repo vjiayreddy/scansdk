@@ -25,6 +25,24 @@
 *.pem
 .tmp-verify/
 
+# cursor / local IDE
+.cursor/
+
+# onnxruntime / local tooling artifacts
+:memory:*
+*.ses
+
+# local dev scripts (personal machine setup)
+scripts/fix-github-ssh.sh
+
+# playwright
+/test-results/
+/playwright-report/
+/blob-report/
+
+# logs
+*.log
+
 # debug
 npm-debug.log*
 yarn-debug.log*
