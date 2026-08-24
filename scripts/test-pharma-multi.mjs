@@ -29,18 +29,15 @@ for (const testCase of cases) {
   const filePath = path.join(root, "test-fixtures", testCase.file);
   await page.locator('input[type="file"]').setInputFiles(filePath);
 
-  await page.getByText("Detected Barcodes", { exact: false }).waitFor({
+  await page.getByText("Detected barcodes", { exact: false }).waitFor({
     timeout: 120000,
   });
 
-  const heading = await page
-    .getByText(/Detected Barcodes \(\d+\)/)
-    .textContent();
-  const match = heading?.match(/Detected Barcodes \((\d+)\)/);
-  const count = match ? Number(match[1]) : 0;
+  const listItems = page.getByRole("listitem");
+  await listItems.first().waitFor({ timeout: 120000 });
+  const count = await listItems.count();
 
-  const dataMatrixLabels = await page
-    .getByRole("listitem")
+  const dataMatrixLabels = await listItems
     .getByText("DATA MATRIX", { exact: true })
     .count();
 
