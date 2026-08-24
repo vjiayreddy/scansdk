@@ -1,6 +1,6 @@
 /** Shared YOLO postprocess + letterbox helpers (main thread + worker). */
 
-export const YOLO_CONF = 0.25;
+export const YOLO_CONF = 0.2;
 export const YOLO_IOU = 0.45;
 
 export interface YoloBox {
