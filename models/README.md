@@ -7,7 +7,8 @@ App loads **`/models/barcode-yolo11n.onnx`** from `public/models/`.
 | Class | `0: datamatrix` |
 | Input | `1 × 3 × 960 × 960` RGB, letterboxed |
 | Output | `1 × 5 × 18900` (`cx, cy, w, h, score`) |
-| Conf / NMS | `0.25` / `0.45` |
+| Conf / NMS | `0.20` / `0.45` |
+| Upload locate | Full-frame + overlapping tiles (2×2 normal / 3×3 hard) when long side ≥ 1200 |
 
 Export from a trained checkpoint:
 

@@ -152,7 +152,10 @@ async function scanWithYolo(
   onPhase?: (update: ScanPhaseUpdate) => void,
 ): Promise<ScanDetection[] | null> {
   onPhase?.({ phase: "locating" });
-  const located = await locateBarcodes(canvas);
+  const located = await locateBarcodes(canvas, {
+    tiled: "auto",
+    hard: mode === "hard",
+  });
   if (located.length === 0) {
     return null;
   }
@@ -214,7 +217,10 @@ export async function scanImage(
     }
 
     onPhase?.({ phase: "locating" });
-    const located = await locateBarcodes(canvas);
+    const located = await locateBarcodes(canvas, {
+      tiled: "auto",
+      hard: true,
+    });
     const barcodes = mapCanvasCoordsToOriginal(
       located.map((box) => yoloBoxToDetection(box, "located")),
       canvas.width,
