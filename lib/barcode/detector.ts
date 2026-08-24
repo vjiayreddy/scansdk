@@ -11,6 +11,7 @@ import type {
   ScanPhaseUpdate,
   ScanResult,
 } from "./types";
+import { yoloClassLabel } from "./yolo-config";
 import { getYoloLoadError, isYoloAvailable, locateBarcodes, type YoloBox } from "./yolo-locate";
 
 export type ScanImageOptions = {
@@ -69,6 +70,7 @@ function yoloBoxToDetection(
 ): ScanDetection {
   const x2 = box.x + box.width;
   const y2 = box.y + box.height;
+  const label = yoloClassLabel(box.classId);
 
   return {
     rawValue: "",
@@ -88,6 +90,8 @@ function yoloBoxToDetection(
     status,
     score: box.score,
     source: "yolo",
+    yoloClassId: box.classId,
+    yoloLabel: label,
   };
 }
 
@@ -129,7 +133,11 @@ function mergeYoloAndDecoded(
 
     if (bestIndex >= 0) {
       usedDecoded.add(bestIndex);
-      detections.push(asRead(decoded[bestIndex], "yolo", box.score));
+      detections.push({
+        ...asRead(decoded[bestIndex], "yolo", box.score),
+        yoloClassId: box.classId,
+        yoloLabel: yoloClassLabel(box.classId),
+      });
     } else {
       detections.push(yoloBoxToDetection(box, "unread"));
     }

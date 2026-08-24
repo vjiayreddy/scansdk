@@ -9,6 +9,8 @@ export interface YoloBox {
   width: number;
   height: number;
   score: number;
+  /** Argmax class id for multi-class models (`1 × (4+nc) × N`). */
+  classId?: number;
 }
 
 export function boxIou(a: YoloBox, b: YoloBox): number {
@@ -51,6 +53,41 @@ export function rgbaToChw(
   }
 }
 
+function resolveLayout(dims: readonly number[]): {
+  channels: number;
+  count: number;
+  channelMajor: boolean;
+} | null {
+  if (dims.length === 3 && dims[1]! >= 5) {
+    return { channels: dims[1]!, count: dims[2]!, channelMajor: true };
+  }
+  if (dims.length === 3 && dims[2]! >= 5) {
+    return { channels: dims[2]!, count: dims[1]!, channelMajor: false };
+  }
+  if (dims.length === 2 && dims[0]! >= 5) {
+    return { channels: dims[0]!, count: dims[1]!, channelMajor: true };
+  }
+  return null;
+}
+
+function readChannel(
+  data: Float32Array,
+  channelMajor: boolean,
+  channels: number,
+  count: number,
+  channel: number,
+  index: number,
+): number | undefined {
+  return channelMajor
+    ? data[channel * count + index]
+    : data[index * channels + channel];
+}
+
+/**
+ * Parse Ultralytics detect ONNX output.
+ * - Single-class / class-agnostic: `1 × 5 × N` → (cx, cy, w, h, score)
+ * - Multi-class: `1 × (4+nc) × N` → (cx, cy, w, h, cls0..clsN-1); score = max cls
+ */
 export function parseYoloOutputData(
   data: Float32Array,
   dims: readonly number[],
@@ -62,41 +99,20 @@ export function parseYoloOutputData(
   conf = YOLO_CONF,
   iou = YOLO_IOU,
 ): YoloBox[] {
-  const channels = 5;
-  let count = 0;
-  let channelMajor = true;
-
-  if (dims.length === 3 && dims[1] === 5) {
-    count = dims[2]!;
-    channelMajor = true;
-  } else if (dims.length === 3 && dims[2] === 5) {
-    count = dims[1]!;
-    channelMajor = false;
-  } else if (dims.length === 2 && dims[0] === 5) {
-    count = dims[1]!;
-    channelMajor = true;
-  } else {
+  const layout = resolveLayout(dims);
+  if (!layout) {
     return [];
   }
 
+  const { channels, count, channelMajor } = layout;
+  const numClasses = Math.max(1, channels - 4);
   const boxes: YoloBox[] = [];
 
   for (let index = 0; index < count; index += 1) {
-    const cx = channelMajor ? data[index] : data[index * channels];
-    const cy = channelMajor ? data[count + index] : data[index * channels + 1];
-    const width = channelMajor
-      ? data[2 * count + index]
-      : data[index * channels + 2];
-    const height = channelMajor
-      ? data[3 * count + index]
-      : data[index * channels + 3];
-    const score = channelMajor
-      ? data[4 * count + index]
-      : data[index * channels + 4];
-
-    if (score === undefined || score < conf) {
-      continue;
-    }
+    const cx = readChannel(data, channelMajor, channels, count, 0, index);
+    const cy = readChannel(data, channelMajor, channels, count, 1, index);
+    const width = readChannel(data, channelMajor, channels, count, 2, index);
+    const height = readChannel(data, channelMajor, channels, count, 3, index);
 
     if (
       cx === undefined ||
@@ -104,6 +120,26 @@ export function parseYoloOutputData(
       width === undefined ||
       height === undefined
     ) {
+      continue;
+    }
+
+    let score = 0;
+    let classId = 0;
+    if (numClasses === 1) {
+      score = readChannel(data, channelMajor, channels, count, 4, index) ?? 0;
+      classId = 0;
+    } else {
+      for (let c = 0; c < numClasses; c += 1) {
+        const classScore =
+          readChannel(data, channelMajor, channels, count, 4 + c, index) ?? 0;
+        if (classScore > score) {
+          score = classScore;
+          classId = c;
+        }
+      }
+    }
+
+    if (score < conf) {
       continue;
     }
 
@@ -118,6 +154,7 @@ export function parseYoloOutputData(
       width: Math.min(mappedWidth, canvasWidth - Math.max(0, x)),
       height: Math.min(mappedHeight, canvasHeight - Math.max(0, y)),
       score,
+      classId,
     });
   }
 

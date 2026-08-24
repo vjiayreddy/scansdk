@@ -9,6 +9,26 @@ export const YOLO_LIVE_MODEL_URL = YOLO_MODEL_URL;
 export const YOLO_WASM_PATHS = "/ort/";
 
 /**
+ * Class names for the 4-class test model (ONNX output `1 × 8 × N`).
+ * Single-class models still work (output `1 × 5 × N`, classId defaults to 0).
+ */
+export const YOLO_CLASS_NAMES = [
+  "datamatrix",
+  "EAN13",
+  "CODE128",
+  "GS1_128",
+] as const;
+
+export type YoloClassName = (typeof YOLO_CLASS_NAMES)[number];
+
+export function yoloClassLabel(classId: number | undefined): string {
+  if (classId === undefined || classId < 0) {
+    return "barcode";
+  }
+  return YOLO_CLASS_NAMES[classId] ?? `class_${classId}`;
+}
+
+/**
  * Upload locate: full-frame + overlapping tiles so small codes stay large in the
  * 960 letterbox (dense trays / wide warehouse photos).
  */

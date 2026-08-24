@@ -279,6 +279,16 @@ export function BarcodeResults({
                       {formatLabel(barcode.format)}
                     </span>
                   ) : null}
+                  {!isRead && barcode.yoloLabel ? (
+                    <span className="inline-flex rounded-sm border border-hairline px-2.5 py-0.5 text-xs font-semibold text-ink dark:border-[var(--border)] dark:text-[var(--foreground)]">
+                      YOLO {formatLabel(barcode.yoloLabel)}
+                    </span>
+                  ) : null}
+                  {isRead && barcode.yoloLabel ? (
+                    <span className="text-xs text-muted">
+                      yolo:{formatLabel(barcode.yoloLabel)}
+                    </span>
+                  ) : null}
                   {barcode.score !== undefined ? (
                     <span className="text-xs text-muted">
                       {Math.round(barcode.score * 100)}%
