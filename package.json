@@ -1,6 +1,6 @@
 {
   "name": "scansdk",
-  "version": "0.2.0-4class",
+  "version": "0.2.1-dm-code128",
   "private": true,
   "scripts": {
     "dev": "next dev",

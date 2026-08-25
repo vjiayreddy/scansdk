@@ -11,7 +11,7 @@ import {
   invertImageData,
   suppressGlare,
 } from "./correct-image";
-import { dedupeBarcodes, mapReadResult } from "./map-result";
+import { dedupeBarcodes, mapNativeFormat, mapReadResult } from "./map-result";
 import {
   cylinderSkewQuads,
   extrapolateQuadFromDetection,
@@ -34,10 +34,15 @@ import type { ReaderOptions } from "zxing-wasm/reader";
 
 import {
   BINARIZER_PASSES,
+  CODE128_HARD_CROP_OPTIONS,
   DATAMATRIX_CROP_OPTIONS,
   DATAMATRIX_HARD_CROP_OPTIONS,
+  YOLO_CROP_OPTIONS,
+  YOLO_HARD_CROP_OPTIONS,
+  cropOptionsForYoloClass,
   cropOptionsWithBinarizer,
 } from "./reader-options";
+import { detectNativeBarcodes } from "./native-barcode-detector";
 import {
   isExpired,
   remainingMs,
@@ -60,7 +65,7 @@ export interface CropScanOptions {
   hardMode?: boolean;
   /** Skip expensive geometry passes — use for wide coverage sweeps. */
   fastOnly?: boolean;
-  /** Override default Data-Matrix-only crop reader (e.g. live multi-format). */
+  /** Override default YOLO crop reader (DataMatrix + Code128). */
   readerOptions?: ReaderOptions;
   /**
    * Live camera crops: ~12% YOLO expand, no extra 45% pad, capped upscale.
@@ -229,7 +234,7 @@ async function decodeImageData(
 async function decodeCropPasses(
   base: ImageData,
   hardMode = false,
-  readerOptions: ReaderOptions = DATAMATRIX_CROP_OPTIONS,
+  readerOptions: ReaderOptions = YOLO_CROP_OPTIONS,
 ): Promise<ReturnType<typeof mapReadResult>[]> {
   const hardOptions: ReaderOptions = {
     ...readerOptions,
@@ -257,7 +262,10 @@ async function decodeCropPasses(
       hardMode && imageData !== base
         ? readerOptions === DATAMATRIX_CROP_OPTIONS
           ? DATAMATRIX_HARD_CROP_OPTIONS
-          : hardOptions
+          : readerOptions === CODE128_HARD_CROP_OPTIONS ||
+              readerOptions.formats?.includes("Code128")
+            ? { ...readerOptions, tryDenoise: true, tryHarder: true }
+            : hardOptions
         : readerOptions;
     const valid = await decodeImageData(imageData, options, hardMode);
     if (valid.length > 0) {
@@ -531,6 +539,83 @@ async function decodeBottleStripPasses(
   return [];
 }
 
+/**
+ * Split a wide/tall CODE128 crop into horizontal bands (dual GS1 bars on
+ * one loose YOLO box) and decode each with Code128-only options.
+ */
+async function decodeCode128BandPasses(
+  canvas: HTMLCanvasElement,
+  proposal: RegionProposal,
+  deadline: number,
+): Promise<ReturnType<typeof mapReadResult>[]> {
+  if (isExpired(deadline)) {
+    return [];
+  }
+  if (proposal.classId !== undefined && proposal.classId !== 1) {
+    return [];
+  }
+
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) {
+    return [];
+  }
+
+  const bandCount =
+    proposal.height > proposal.width * 1.2
+      ? 3
+      : proposal.width > proposal.height * 2.5
+        ? 2
+        : 2;
+  const allHits: ReturnType<typeof mapReadResult>[] = [];
+
+  for (let band = 0; band < bandCount; band += 1) {
+    if (isExpired(deadline) || remainingMs(deadline) < 80) {
+      break;
+    }
+    const bandH = Math.max(16, Math.round(proposal.height / bandCount));
+    const y = Math.round(proposal.y + band * bandH);
+    const height = Math.min(bandH + Math.round(bandH * 0.15), canvas.height - y);
+    const x = Math.max(0, Math.round(proposal.x));
+    const width = Math.min(Math.round(proposal.width), canvas.width - x);
+    if (width < 36 || height < 12) {
+      continue;
+    }
+
+    const { canvas: cropCanvas, scale } = upscaleRegion(
+      canvas,
+      { x, y, width, height },
+      Math.max(MIN_UPSCALE, MIN_CROP_SIDE / Math.min(width, height)),
+      true,
+    );
+    const cropCtx = cropCanvas.getContext("2d", { willReadFrequently: true });
+    if (!cropCtx) {
+      continue;
+    }
+    const data = cropCtx.getImageData(0, 0, cropCanvas.width, cropCanvas.height);
+    const hits = await decodeCropPasses(data, true, CODE128_HARD_CROP_OPTIONS);
+    if (hits.length === 0) {
+      continue;
+    }
+    for (const hit of hits) {
+      allHits.push({
+        ...hit,
+        cornerPoints: hit.cornerPoints.map((point) => ({
+          x: x + point.x / scale,
+          y: y + point.y / scale,
+        })) as typeof hit.cornerPoints,
+        boundingBox: {
+          x: x + hit.boundingBox.x / scale,
+          y: y + hit.boundingBox.y / scale,
+          width: hit.boundingBox.width / scale,
+          height: hit.boundingBox.height / scale,
+        },
+      });
+    }
+  }
+
+  return allHits;
+}
+
 function upscaleRegion(
   source: HTMLCanvasElement,
   region: { x: number; y: number; width: number; height: number },
@@ -650,7 +735,9 @@ async function decodeProposal(
   const hardMode = options.hardMode === true;
   const fastOnly = options.fastOnly === true;
   const liveCrop = options.liveCrop === true;
-  const readerOpts = options.readerOptions ?? DATAMATRIX_CROP_OPTIONS;
+  const readerOpts =
+    options.readerOptions ??
+    cropOptionsForYoloClass(proposal.classId, hardMode && !fastOnly);
   const scene = analyzeScene(
     canvas.width,
     canvas.height,
@@ -661,7 +748,7 @@ async function decodeProposal(
     proposal,
     canvas.width,
     canvas.height,
-    liveCrop ? 0 : CROP_PADDING,
+    liveCrop ? 0 : proposal.classId === 1 ? 0.55 : CROP_PADDING,
   );
   const previewCtx = canvas.getContext("2d", { willReadFrequently: true });
   if (!previewCtx) {
@@ -695,6 +782,56 @@ async function decodeProposal(
   }
 
   const cropData = cropCtx.getImageData(0, 0, cropCanvas.width, cropCanvas.height);
+
+  // Native BarcodeDetector (Chrome) — fast Code128 / DM boost before zxing-wasm.
+  if (typeof window !== "undefined" && remainingMs(deadline) > 40) {
+    try {
+      const nativeHits = await detectNativeBarcodes(cropCanvas);
+      const wanted = proposal.classId === 1 ? "code_128" : proposal.classId === 0 ? "data_matrix" : null;
+      const filtered = nativeHits.filter((hit) => {
+        if (!hit.rawValue) {
+          return false;
+        }
+        if (!wanted) {
+          return hit.format === "code_128" || hit.format === "data_matrix";
+        }
+        return hit.format === wanted;
+      });
+      if (filtered.length > 0) {
+        return filtered.map((hit) => ({
+          rawValue: hit.rawValue,
+          format: mapNativeFormat(hit.format),
+          boundingBox: {
+            x: region.x + hit.boundingBox.x / scale,
+            y: region.y + hit.boundingBox.y / scale,
+            width: hit.boundingBox.width / scale,
+            height: hit.boundingBox.height / scale,
+          },
+          cornerPoints: [
+            {
+              x: region.x + hit.boundingBox.x / scale,
+              y: region.y + hit.boundingBox.y / scale,
+            },
+            {
+              x: region.x + (hit.boundingBox.x + hit.boundingBox.width) / scale,
+              y: region.y + hit.boundingBox.y / scale,
+            },
+            {
+              x: region.x + (hit.boundingBox.x + hit.boundingBox.width) / scale,
+              y: region.y + (hit.boundingBox.y + hit.boundingBox.height) / scale,
+            },
+            {
+              x: region.x + hit.boundingBox.x / scale,
+              y: region.y + (hit.boundingBox.y + hit.boundingBox.height) / scale,
+            },
+          ],
+        }));
+      }
+    } catch {
+      // Fall through to zxing-wasm.
+    }
+  }
+
   let decoded = await decodeCropPasses(
     cropData,
     useHardPasses && !fastOnly,
@@ -826,6 +963,25 @@ async function decodeProposal(
         cropCanvas.width,
         cropCanvas.height,
       );
+    }
+  }
+
+  if (useHardPasses && remainingMs(deadline) > 200) {
+    decoded = await decodeCode128BandPasses(canvas, proposal, deadline);
+    if (decoded.length > 0) {
+      return decoded.map((hit) => {
+        const xs = hit.cornerPoints.map((point) => point.x);
+        const ys = hit.cornerPoints.map((point) => point.y);
+        return {
+          ...hit,
+          boundingBox: {
+            x: Math.min(...xs),
+            y: Math.min(...ys),
+            width: Math.max(...xs) - Math.min(...xs),
+            height: Math.max(...ys) - Math.min(...ys),
+          },
+        };
+      });
     }
   }
 
@@ -1126,7 +1282,14 @@ export async function scanUniformCrops(
 /** Decode YOLO (or other) boxes as crop regions — fast sweep, then deep on misses. */
 export async function scanLocatedRegions(
   canvas: HTMLCanvasElement,
-  regions: Array<{ x: number; y: number; width: number; height: number; score?: number }>,
+  regions: Array<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    score?: number;
+    classId?: number;
+  }>,
   deadline: number,
   options: CropScanOptions = {},
 ): Promise<DetectedBarcode[]> {
@@ -1145,6 +1308,7 @@ export async function scanLocatedRegions(
       width: Math.round(region.width),
       height: Math.round(region.height),
       score: Math.round((region.score ?? 1) * 100_000),
+      classId: region.classId,
     }))
     // Higher-confidence / larger boxes first so budget favors likely wins.
     .sort((a, b) => b.score - a.score || b.width * b.height - a.width * a.height);
@@ -1153,7 +1317,13 @@ export async function scanLocatedRegions(
     return [];
   }
 
-  const fastOptions: CropScanOptions = { ...options, fastOnly: true };
+  // Default upload YOLO crops to DM + Code128 (not DM-only).
+  const baseOptions: CropScanOptions = {
+    ...options,
+    readerOptions: options.readerOptions ?? YOLO_CROP_OPTIONS,
+  };
+
+  const fastOptions: CropScanOptions = { ...baseOptions, fastOnly: true };
   const fastHits = await decodeProposals(
     canvas,
     proposals,
@@ -1175,7 +1345,7 @@ export async function scanLocatedRegions(
 
   // Misses always get hard crop passes — normal mode previously skipped them.
   const deepOptions: CropScanOptions = {
-    ...options,
+    ...baseOptions,
     fastOnly: false,
     hardMode: true,
   };
@@ -1192,14 +1362,39 @@ export async function scanLocatedRegions(
 
 /** Grow YOLO boxes so quiet-zone / module edges aren't clipped. */
 function expandYoloRegion(
-  region: { x: number; y: number; width: number; height: number; score?: number },
+  region: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    score?: number;
+    classId?: number;
+  },
   canvasWidth: number,
   canvasHeight: number,
   liveCrop = false,
-): { x: number; y: number; width: number; height: number; score?: number } {
-  const ratio = liveCrop ? 0.12 : 0.22;
-  const padX = Math.max(liveCrop ? 4 : 6, Math.round(region.width * ratio));
-  const padY = Math.max(liveCrop ? 4 : 6, Math.round(region.height * ratio));
+): {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  score?: number;
+  classId?: number;
+} {
+  const isCode128 = region.classId === 1;
+  const ratio = liveCrop ? 0.12 : isCode128 ? 0.35 : 0.22;
+  let padX = Math.max(liveCrop ? 4 : 6, Math.round(region.width * ratio));
+  let padY = Math.max(liveCrop ? 4 : 6, Math.round(region.height * ratio));
+  // Vertical / horizontal 1D: extra pad along the bar axis for quiet zones.
+  if (isCode128 && !liveCrop) {
+    if (region.height >= region.width) {
+      padY = Math.max(padY, Math.round(region.height * 0.2));
+      padX = Math.max(padX, Math.round(region.width * 0.45));
+    } else {
+      padX = Math.max(padX, Math.round(region.width * 0.2));
+      padY = Math.max(padY, Math.round(region.height * 0.45));
+    }
+  }
   const x = clamp(region.x - padX, 0, canvasWidth - 1);
   const y = clamp(region.y - padY, 0, canvasHeight - 1);
   const right = clamp(region.x + region.width + padX, x + 1, canvasWidth);
@@ -1210,6 +1405,7 @@ function expandYoloRegion(
     width: right - x,
     height: bottom - y,
     score: region.score,
+    classId: region.classId,
   };
 }
 

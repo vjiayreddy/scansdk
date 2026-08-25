@@ -24,6 +24,11 @@
 .DS_Store
 *.pem
 .tmp-verify/
+.tmp-barcodes-clean/
+.tmp-2class-build/
+.tmp-drugzone-eval/
+.tmp-drugzone-eval-portrait/
+.tmp-eval-locate/
 
 # debug
 npm-debug.log*

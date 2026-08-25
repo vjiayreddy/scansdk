@@ -11,11 +11,23 @@ import type {
   ScanPhaseUpdate,
   ScanResult,
 } from "./types";
-import { yoloClassLabel } from "./yolo-config";
+import { enrichLocateWithCode128Siblings } from "./code128-siblings";
+import {
+  applyStrictBarcodePolicy,
+  filterPlausibleLocateBoxes,
+} from "./strict-barcode";
+import {
+  filterYoloBoxesByClass,
+  YOLO_STRICT_BARCODE_ONLY,
+  yoloClassLabel,
+  type YoloClassFilter,
+} from "./yolo-config";
 import { getYoloLoadError, isYoloAvailable, locateBarcodes, type YoloBox } from "./yolo-locate";
 
 export type ScanImageOptions = {
   onPhase?: (update: ScanPhaseUpdate) => void;
+  /** Which YOLO classes to localize (default both). */
+  classFilter?: YoloClassFilter;
 };
 
 let wasmPrepared = false;
@@ -158,12 +170,32 @@ async function scanWithYolo(
   originalSize: { width: number; height: number },
   start: number,
   onPhase?: (update: ScanPhaseUpdate) => void,
+  classFilter: YoloClassFilter = "both",
 ): Promise<ScanDetection[] | null> {
   onPhase?.({ phase: "locating" });
-  const located = await locateBarcodes(canvas, {
+  const rawLocated = await locateBarcodes(canvas, {
     tiled: "auto",
     hard: mode === "hard",
   });
+  if (rawLocated.length === 0) {
+    return null;
+  }
+
+  // Sibling strips invent boxes in empty/text areas — off in strict mode.
+  // Also skip when user asked for DataMatrix-only.
+  const withSiblings =
+    YOLO_STRICT_BARCODE_ONLY || classFilter === "datamatrix"
+      ? rawLocated
+      : enrichLocateWithCode128Siblings(
+          rawLocated,
+          canvas.width,
+          canvas.height,
+        );
+
+  const located = filterYoloBoxesByClass(
+    filterPlausibleLocateBoxes(withSiblings, canvas.width, canvas.height),
+    classFilter,
+  );
   if (located.length === 0) {
     return null;
   }
@@ -193,15 +225,18 @@ async function scanWithYolo(
   const readCount = merged.filter((item) => item.status === "read").length;
 
   // YOLO crops can miss soft/compressed Data Matrix; tile/proposal pass recovers more.
-  // scanCanvas has its own deadline — do not gate on YOLO budget remaining.
-  if (readCount < Math.max(1, Math.ceil(located.length * 0.35))) {
+  // Skip multi-format tile fallback when user filtered to one class.
+  if (
+    classFilter === "both" &&
+    readCount < Math.max(1, Math.ceil(located.length * 0.35))
+  ) {
     const fallback = await scanCanvas(canvas, { mode });
     if (fallback.length > 0) {
       merged = mergeYoloAndDecoded(located, [...decoded, ...fallback]);
     }
   }
 
-  return merged;
+  return applyStrictBarcodePolicy(merged, canvas.width, canvas.height);
 }
 
 export async function scanImage(
@@ -212,6 +247,7 @@ export async function scanImage(
   const start = performance.now();
   prepareWasm();
   const onPhase = options?.onPhase;
+  const classFilter = options?.classFilter ?? "both";
 
   const { canvas, originalSize } = await prepareCanvasFromFile(file);
 
@@ -225,10 +261,22 @@ export async function scanImage(
     }
 
     onPhase?.({ phase: "locating" });
-    const located = await locateBarcodes(canvas, {
+    const rawLocated = await locateBarcodes(canvas, {
       tiled: "auto",
       hard: true,
     });
+    const withSiblings =
+      YOLO_STRICT_BARCODE_ONLY || classFilter === "datamatrix"
+        ? rawLocated
+        : enrichLocateWithCode128Siblings(
+            rawLocated,
+            canvas.width,
+            canvas.height,
+          );
+    const located = filterYoloBoxesByClass(
+      filterPlausibleLocateBoxes(withSiblings, canvas.width, canvas.height),
+      classFilter,
+    );
     const barcodes = mapCanvasCoordsToOriginal(
       located.map((box) => yoloBoxToDetection(box, "located")),
       canvas.width,
@@ -250,15 +298,22 @@ export async function scanImage(
     originalSize,
     start,
     onPhase,
+    classFilter,
   );
-  const barcodes: ScanDetection[] =
+  const barcodes: ScanDetection[] = applyStrictBarcodePolicy(
     yoloDetections ??
-    (await (async () => {
-      onPhase?.({ phase: "reading" });
-      return (await scanCanvas(canvas, { mode })).map((barcode) =>
-        asRead(barcode, "proposal"),
-      );
-    })());
+      (await (async () => {
+        if (classFilter !== "both") {
+          return [];
+        }
+        onPhase?.({ phase: "reading" });
+        return (await scanCanvas(canvas, { mode })).map((barcode) =>
+          asRead(barcode, "proposal"),
+        );
+      })()),
+    canvas.width,
+    canvas.height,
+  );
 
   const scaledBarcodes = mapCanvasCoordsToOriginal(
     barcodes,

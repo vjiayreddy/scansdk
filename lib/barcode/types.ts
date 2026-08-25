@@ -17,7 +17,7 @@ export type ScanDetection = DetectedBarcode & {
   source?: "yolo" | "zxing-full" | "proposal";
   /** YOLO class id when located by multi-class model. */
   yoloClassId?: number;
-  /** YOLO class label (e.g. datamatrix / EAN13 / CODE128 / GS1_128). */
+  /** YOLO class label (e.g. datamatrix / CODE128). */
   yoloLabel?: string;
 };
 

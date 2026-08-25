@@ -1,7 +1,27 @@
 /** Shared YOLO postprocess + letterbox helpers (main thread + worker). */
 
-export const YOLO_CONF = 0.2;
-export const YOLO_IOU = 0.45;
+/**
+ * Locate conf — CODE128 stays strict; DM slightly lower for side-angle packs.
+ */
+export const YOLO_CONF = 0.18;
+export const YOLO_IOU = 0.4;
+
+/** Per-class floors (2-class: 0=datamatrix, 1=CODE128). Falls back to YOLO_CONF. */
+export const YOLO_CONF_BY_CLASS: Record<number, number> = {
+  0: 0.08, // datamatrix — tiny / far packs score weak in full-frame letterbox
+  1: 0.25, // CODE128 — keep higher to limit rim/text FPs
+};
+
+/**
+ * Tile passes: softer so small DM in zoomed tiles survive.
+ */
+export const YOLO_TILE_CONF_SCALE = 0.75;
+
+/** Softer NMS for CODE128 so two stacked bars on one label both survive. */
+export const YOLO_IOU_BY_CLASS: Record<number, number> = {
+  0: 0.4,
+  1: 0.18,
+};
 
 export interface YoloBox {
   x: number;
@@ -25,12 +45,41 @@ export function boxIou(a: YoloBox, b: YoloBox): number {
   return union <= 0 ? 0 : inter / union;
 }
 
+/**
+ * NMS. When boxes carry `classId`, suppress only within the same class so
+ * adjacent DM + 1D on one label can both survive (Ultralytics-style).
+ * CODE128 uses a lower IoU so stacked dual bars are not collapsed into one.
+ */
 export function nms(boxes: YoloBox[], iouThresh: number): YoloBox[] {
   const ordered = [...boxes].sort((a, b) => b.score - a.score);
   const kept: YoloBox[] = [];
 
   for (const box of ordered) {
-    if (kept.every((existing) => boxIou(existing, box) < iouThresh)) {
+    const classIou =
+      box.classId !== undefined
+        ? (YOLO_IOU_BY_CLASS[box.classId] ?? iouThresh)
+        : iouThresh;
+    const sameClass = (existing: YoloBox) => {
+      if (box.classId === undefined || existing.classId === undefined) {
+        return true;
+      }
+      return existing.classId === box.classId;
+    };
+    if (
+      kept.every((existing) => {
+        if (!sameClass(existing)) {
+          return true;
+        }
+        const thresh =
+          existing.classId !== undefined
+            ? Math.min(
+                classIou,
+                YOLO_IOU_BY_CLASS[existing.classId] ?? iouThresh,
+              )
+            : classIou;
+        return boxIou(existing, box) < thresh;
+      })
+    ) {
       kept.push(box);
     }
   }
@@ -98,6 +147,8 @@ export function parseYoloOutputData(
   canvasHeight: number,
   conf = YOLO_CONF,
   iou = YOLO_IOU,
+  /** Multiply per-class floors (e.g. tile passes use YOLO_TILE_CONF_SCALE). */
+  classConfScale = 1,
 ): YoloBox[] {
   const layout = resolveLayout(dims);
   if (!layout) {
@@ -107,6 +158,7 @@ export function parseYoloOutputData(
   const { channels, count, channelMajor } = layout;
   const numClasses = Math.max(1, channels - 4);
   const boxes: YoloBox[] = [];
+  const scaleFloor = Math.min(1, Math.max(0.5, classConfScale));
 
   for (let index = 0; index < count; index += 1) {
     const cx = readChannel(data, channelMajor, channels, count, 0, index);
@@ -139,7 +191,9 @@ export function parseYoloOutputData(
       }
     }
 
-    if (score < conf) {
+    const classFloor =
+      (YOLO_CONF_BY_CLASS[classId] ?? conf) * scaleFloor;
+    if (score < classFloor) {
       continue;
     }
 

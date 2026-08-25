@@ -6,15 +6,26 @@ import {
   prewarmBarcodeDetector,
   scanImage,
 } from "@/lib/barcode/detector";
+import type { YoloClassFilter } from "@/lib/barcode/yolo-config";
 import type { ScanMode, ScanResult, ScannerStatus } from "@/lib/barcode/types";
 
 interface UseBarcodeScannerResult {
   status: ScannerStatus;
   results: ScanResult | null;
   error: string | null;
-  scan: (file: File, mode?: ScanMode) => Promise<ScanResult | null>;
-  scanHarder: (file: File) => Promise<ScanResult | null>;
-  scanLocate: (file: File) => Promise<ScanResult | null>;
+  scan: (
+    file: File,
+    mode?: ScanMode,
+    classFilter?: YoloClassFilter,
+  ) => Promise<ScanResult | null>;
+  scanHarder: (
+    file: File,
+    classFilter?: YoloClassFilter,
+  ) => Promise<ScanResult | null>;
+  scanLocate: (
+    file: File,
+    classFilter?: YoloClassFilter,
+  ) => Promise<ScanResult | null>;
   reset: () => void;
   isReady: boolean;
 }
@@ -58,7 +69,11 @@ export function useBarcodeScanner(): UseBarcodeScannerResult {
   }, [isReady]);
 
   const scan = useCallback(
-    async (file: File, mode: ScanMode = "normal"): Promise<ScanResult | null> => {
+    async (
+      file: File,
+      mode: ScanMode = "normal",
+      classFilter: YoloClassFilter = "both",
+    ): Promise<ScanResult | null> => {
       const scanId = ++scanIdRef.current;
       setError(null);
       setResults(null);
@@ -78,6 +93,7 @@ export function useBarcodeScanner(): UseBarcodeScannerResult {
 
       try {
         const result = await scanImage(file, mode, {
+          classFilter,
           onPhase: (update) => {
             if (scanId !== scanIdRef.current) {
               return;
@@ -125,12 +141,14 @@ export function useBarcodeScanner(): UseBarcodeScannerResult {
   );
 
   const scanHarder = useCallback(
-    (file: File) => scan(file, "hard"),
+    (file: File, classFilter: YoloClassFilter = "both") =>
+      scan(file, "hard", classFilter),
     [scan],
   );
 
   const scanLocate = useCallback(
-    (file: File) => scan(file, "locate"),
+    (file: File, classFilter: YoloClassFilter = "both") =>
+      scan(file, "locate", classFilter),
     [scan],
   );
 
