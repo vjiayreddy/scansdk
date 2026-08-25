@@ -17,7 +17,9 @@ import {
   nms,
   parseYoloOutputData,
   rgbaToChw,
+  YOLO_CONF,
   YOLO_IOU,
+  YOLO_TILE_CONF_SCALE,
   type YoloBox,
 } from "@/lib/barcode/yolo-core";
 import {
@@ -34,7 +36,7 @@ export {
   YOLO_MODEL_URL,
   YOLO_WASM_PATHS,
 } from "@/lib/barcode/yolo-config";
-export { YOLO_CONF, YOLO_IOU } from "@/lib/barcode/yolo-core";
+export { YOLO_CONF, YOLO_IOU, YOLO_TILE_CONF_SCALE } from "@/lib/barcode/yolo-core";
 
 export type YoloModelKind = "upload" | "live";
 
@@ -227,6 +229,7 @@ function parseYoloOutput(
   padY: number,
   canvasWidth: number,
   canvasHeight: number,
+  classConfScale = 1,
 ): YoloBox[] {
   return parseYoloOutputData(
     output.data as Float32Array,
@@ -236,6 +239,9 @@ function parseYoloOutput(
     padY,
     canvasWidth,
     canvasHeight,
+    YOLO_CONF,
+    YOLO_IOU,
+    classConfScale,
   );
 }
 
@@ -243,6 +249,7 @@ async function runLocateRegion(
   source: LetterboxSource,
   kind: YoloModelKind,
   region?: Region,
+  classConfScale = 1,
 ): Promise<YoloBox[]> {
   const imgsz = MODEL[kind].imgsz;
   const regionWidth = region?.width ?? getSourceSize(source).width;
@@ -271,6 +278,7 @@ async function runLocateRegion(
     padY,
     regionWidth,
     regionHeight,
+    classConfScale,
   );
 
   if (!region) {
@@ -362,7 +370,12 @@ export async function locateBarcodes(
     if (region.width < 32 || region.height < 32) {
       continue;
     }
-    const boxes = await runLocateRegion(source, "upload", region);
+    const boxes = await runLocateRegion(
+      source,
+      "upload",
+      region,
+      YOLO_TILE_CONF_SCALE,
+    );
     tiledBoxes.push(...boxes);
   }
 

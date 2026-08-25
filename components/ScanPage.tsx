@@ -22,6 +22,10 @@ import {
   ACCEPTED_IMAGE_TYPES,
   MAX_FILE_SIZE_BYTES,
 } from "@/lib/barcode/types";
+import {
+  YOLO_CLASS_FILTER_OPTIONS,
+  type YoloClassFilter,
+} from "@/lib/barcode/yolo-config";
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024 * 1024) {
@@ -37,6 +41,7 @@ export function ScanPage() {
   const [validationError, setValidationError] = useState<string | null>(null);
   const [sheetOpen, setSheetOpen] = useState(false);
   const [zoom, setZoom] = useState(1);
+  const [classFilter, setClassFilter] = useState<YoloClassFilter>("both");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const previewRef = useRef<ImagePreviewHandle>(null);
   const autoOpenedForRef = useRef<string | null>(null);
@@ -100,9 +105,9 @@ export function ScanPage() {
       setZoom(1);
       autoOpenedForRef.current = null;
       setSelectedFile(file);
-      await scan(file);
+      await scan(file, "normal", classFilter);
     },
-    [scan],
+    [scan, classFilter],
   );
 
   const handleScanHarder = useCallback(async () => {
@@ -111,8 +116,24 @@ export function ScanPage() {
     }
     setSheetOpen(false);
     autoOpenedForRef.current = null;
-    await scanHarder(selectedFile);
-  }, [scanHarder, selectedFile]);
+    await scanHarder(selectedFile, classFilter);
+  }, [scanHarder, selectedFile, classFilter]);
+
+  const handleClassFilterChange = useCallback(
+    async (next: YoloClassFilter) => {
+      if (next === classFilter) {
+        return;
+      }
+      setClassFilter(next);
+      if (!selectedFile || isBusy) {
+        return;
+      }
+      setSheetOpen(false);
+      autoOpenedForRef.current = null;
+      await scan(selectedFile, "normal", next);
+    },
+    [classFilter, selectedFile, isBusy, scan],
+  );
 
   const handleReset = useCallback(() => {
     setSelectedFile(null);
@@ -188,6 +209,34 @@ export function ScanPage() {
             {bannerError}
           </div>
         ) : null}
+
+        <div
+          className={`pointer-events-auto absolute left-3 z-20 flex items-center gap-0.5 rounded-full border border-hairline bg-canvas/95 p-1 shadow-md backdrop-blur-sm dark:border-[var(--border)] dark:bg-[var(--background)]/95 ${
+            bannerError ? "top-16" : "top-3"
+          }`}
+          role="group"
+          aria-label="Barcode types to locate"
+        >
+          {YOLO_CLASS_FILTER_OPTIONS.map((option) => {
+            const selected = classFilter === option.id;
+            return (
+              <button
+                key={option.id}
+                type="button"
+                disabled={isBusy}
+                aria-pressed={selected}
+                className={`h-9 rounded-full px-3 text-xs font-semibold tracking-tight transition-colors disabled:opacity-50 ${
+                  selected
+                    ? "bg-ink text-white dark:bg-[var(--foreground)] dark:text-[var(--background)]"
+                    : "text-ink hover:bg-surface-soft dark:text-[var(--foreground)] dark:hover:bg-[var(--surface)]"
+                }`}
+                onClick={() => void handleClassFilterChange(option.id)}
+              >
+                {option.label}
+              </button>
+            );
+          })}
+        </div>
 
         {statusBanner ? (
           <div

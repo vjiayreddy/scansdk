@@ -15,6 +15,10 @@ export type ScanDetection = DetectedBarcode & {
   status: BarcodeStatus;
   score?: number;
   source?: "yolo" | "zxing-full" | "proposal";
+  /** YOLO class id when located by multi-class model. */
+  yoloClassId?: number;
+  /** YOLO class label (e.g. datamatrix / CODE128). */
+  yoloLabel?: string;
 };
 
 export interface ImageSize {

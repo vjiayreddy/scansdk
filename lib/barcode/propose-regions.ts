@@ -6,6 +6,8 @@ export interface RegionProposal {
   width: number;
   height: number;
   score: number;
+  /** YOLO class id when proposal came from locate (0=DM, 1=CODE128). */
+  classId?: number;
 }
 
 /** Window sizes as fraction of min(canvas width, height). */

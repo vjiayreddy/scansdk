@@ -52,6 +52,11 @@ function mapFormat(format: string): DetectedBarcode["format"] {
     .toLowerCase() as DetectedBarcode["format"];
 }
 
+/** Map native BarcodeDetector format strings (`code_128`, `data_matrix`, …). */
+export function mapNativeFormat(format: string): DetectedBarcode["format"] {
+  return format.toLowerCase() as DetectedBarcode["format"];
+}
+
 function offsetPoint(point: { x: number; y: number }, offsetX: number, offsetY: number) {
   return { x: point.x + offsetX, y: point.y + offsetY };
 }
